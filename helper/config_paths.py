@@ -13,9 +13,12 @@ from pathlib import Path
 ERA5_RAW_DIR       = Path("/nird/datapeak/NS9873K/etdu/raw/era5/continuous-format/europe/daily/tp24/")
 CATCHMENT_RAW_DIR  = Path("/nird/datalake/NS9873K/etdu/raw/nve/")
 SENORGE_RAW_DIR    = Path("/nird/datapeak/NS9873K/DATA/senorge/rr/")   # reserved for future use
+GEOJSON_DIR        = CATCHMENT_RAW_DIR     # adjust if GeoJSONs live elsewhere
 
-FIGURES_DIR        = Path("/nird/datalake/NS9873K/lbal/figures/")
-POSTPROC_DIR       = Path("/nird/datalake/NS9873K/lbal/postprocessed/")
+FIGURES_DIR           = Path("/nird/datalake/NS9873K/lbal/figures/")
+FIGURES_DIR_SECONDARY = Path("/nird/home/lbal/internship_storm_hans/figures/")
+POSTPROC_DIR          = Path("/nird/datalake/NS9873K/lbal/postprocessed/")
+WEIGHTS_025_DIR       = Path("/nird/datalake/NS9873K/lbal/postprocessed/0.25_weights")
 
 # ── Catchment registry ─────────────────────────────────────────────────────────
 # Keys   = slug used in filenames and caches
@@ -52,22 +55,39 @@ def acc_tag(window_days: int) -> str:
     """Return a filename-safe accumulation label, e.g. '1day' or '2day'."""
     return f"{window_days}day"
 
-def postproc_dir(dataset: str, resolution: str) -> Path:
-    """Subdirectory for cached catchment time-series NetCDF files."""
-    return POSTPROC_DIR / res_tag(dataset, resolution)
+def postproc_dir(dataset: str) -> Path:
+    """Dataset-level subdirectory for postprocessed grid NetCDF cache files."""
+    return POSTPROC_DIR / dataset
 
-def catchment_nc_path(dataset: str, resolution: str, catchment_slug: str) -> Path:
-    """Full path for a cached catchment time-series NetCDF file."""
-    return postproc_dir(dataset, resolution) / (
-        f"tp_catchment_{catchment_slug}_{res_tag(dataset, resolution)}.nc")
-
-def figure_path(dataset: str, resolution: str, catchment_slug: str,
-                start_year: int, end_year: int,
-                window_days: int = 2,
-                fig_subdir: str = "timeseries_return_hans") -> Path:
-    """Full path for an output PDF, including accumulation window in filename."""
-    fname = (
-        f"timeseries_returnperiod_hans_{dataset}_{resolution}_"
-        f"{acc_tag(window_days)}_{catchment_slug}_dailyprecip_{start_year}-{end_year}.pdf"
+def postproc_filename(dataset: str, resolution: str, window_days: int,
+                      catchment_slug: str, start_year: int, end_year: int) -> str:
+    """Filename for a postprocessed grid-level NetCDF cache file."""
+    return (
+        f"post_processed_{res_tag(dataset, resolution)}_"
+        f"{acc_tag(window_days)}_{catchment_slug}_{start_year}-{end_year}.nc"
     )
-    return FIGURES_DIR / fig_subdir / fname
+
+def catchment_postproc_path(dataset: str, resolution: str, window_days: int,
+                             catchment_slug: str, start_year: int, end_year: int) -> Path:
+    """Full path for a postprocessed grid-level NetCDF cache file."""
+    return postproc_dir(dataset) / postproc_filename(
+        dataset, resolution, window_days, catchment_slug, start_year, end_year
+    )
+
+def figure_filename(dataset: str, resolution: str, window_days: int,
+                    catchment_slug: str, start_year: int, end_year: int) -> str:
+    """PDF filename — no dailyprecip segment, no double underscores for Senorge."""
+    return (
+        f"timeseries_returnperiod_hans_{res_tag(dataset, resolution)}_"
+        f"{acc_tag(window_days)}_{catchment_slug}_{start_year}-{end_year}.pdf"
+    )
+
+def figure_paths(dataset: str, resolution: str, window_days: int,
+                 catchment_slug: str, start_year: int, end_year: int,
+                 fig_subdir: str) -> list:
+    """Return PDF save paths for both the primary and secondary figure roots."""
+    fname = figure_filename(dataset, resolution, window_days,
+                            catchment_slug, start_year, end_year)
+    return [
+        FIGURES_DIR           / fig_subdir / fname,
+        FIGURES_DIR_SECONDARY / fig_subdir / fname,]

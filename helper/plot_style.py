@@ -16,21 +16,19 @@ from return_period import (
     get_event_annual_max,
     fit_gev,
     gev_return_level,
-    estimate_return_period,
-)
+    estimate_return_period,)
 
 
-# ── Matplotlib style defaults ──────────────────────────────────────────────────
+# Matplotlib style defaults
 plt.rcParams.update({
     "font.family":   "DejaVu Sans",
     "font.size":     11,
     "axes.titlesize": 12,
     "axes.labelsize": 11,
-    "figure.dpi":    600,
-})
+    "figure.dpi":    600,})
 
 
-# ── Two-panel figure ───────────────────────────────────────────────────────────
+# Two-panel figure 
 
 def make_figure(
     da: xr.DataArray,
@@ -39,49 +37,44 @@ def make_figure(
     resolution: str,
     window_days: int,
     event_year: int,
-    out_path: Path,
+    out_paths: list,
     exclude_event_year_from_fit: bool = True,
 ) -> None:
-    """
-    Create and save the two-panel Storm Hans analysis figure.
 
-    Panel A — Full weighted time series.
-               Exact event date highlighted with a red dot.
-    Panel B — Return-period plot: Weibull empirical points (blue) +
-               GEV fitted curve (black) + red event point.
-    """
-    # ── Compute everything ────────────────────────────────────────────────────
+    # ── Compute everything
     annual_max_all = get_annual_maxima(da)
-
-    # Event = annual maximum within the Hans year
     event_val, event_date_actual = get_event_annual_max(da, event_year)
 
-    # Fit sample: exclude the event year unless explicitly requested otherwise
     fit_sample = (
         annual_max_all.drop(index=event_year, errors="ignore")
         if exclude_event_year_from_fit
-        else annual_max_all
-    )
+        else annual_max_all)
 
     if len(fit_sample) < 10:
         raise ValueError("Too few annual maxima left for a stable GEV fit.")
 
     c, loc, scale = fit_gev(fit_sample)
     event_T = estimate_return_period(event_val, c, loc, scale)
-    event_T_rounded = int(round(event_T))
+
+    if np.isfinite(event_T):
+        event_T_rounded = int(round(event_T))
+        event_T_str     = f"T ≈ {event_T_rounded} yr"
+        event_T_title   = f"{event_T_rounded} year"
+    else:
+        # Should not occur with inclusive fit, but guard defensively
+        event_T_rounded = None
+        event_T_str     = "T > record (beyond GEV range)"
+        event_T_title   = "beyond record (∞)"
 
     # Empirical plotting positions based on the fit sample
     annual_desc = fit_sample.sort_values(ascending=False)
     emp_T_all = pd.Series(
         (len(annual_desc) + 1) / np.arange(1, len(annual_desc) + 1),
-        index=annual_desc.index,
-    )
+        index=annual_desc.index,)
 
-    # Remove the highlighted event year from the blue scatter so it isn't shown twice
     annual_scatter = annual_desc.drop(index=event_year, errors="ignore")
     emp_T_scatter  = emp_T_all.drop(index=event_year, errors="ignore")
 
-    # GEV curve — never start at T=1 exactly
     T_min   = max(1.01, float(emp_T_scatter.min()))
     T_curve = np.logspace(np.log10(T_min), np.log10(2000.0), 500)
     x_curve = gev_return_level(c, loc, scale, T_curve)
@@ -90,16 +83,15 @@ def make_figure(
     T_curve = T_curve[finite]
     x_curve = x_curve[finite]
 
-    # ── Layout ────────────────────────────────────────────────────────────────
+    # ── Layout
     acc_label = f"{window_days}-day"
 
     fig, axes = plt.subplots(2, 1, figsize=(12, 9))
     fig.suptitle(
         f"Analysis Storm Hans: {dataset.upper()}/{resolution}/{acc_label} —  {catchment_title}",
-        fontsize=16, fontweight="normal", y=0.98,
-    )
+        fontsize=16, fontweight="normal", y=0.98,)
 
-    # ── Panel A: Full time series ─────────────────────────────────────────────
+    # ── Panel A: Full time series
     ax = axes[0]
     ts = da.to_series()
 
@@ -108,14 +100,13 @@ def make_figure(
 
     ax.plot(
         event_date_actual, event_val, "o", color="red", markersize=7, zorder=5,
-        label=f"Storm Hans ({event_date_actual.date()}): {event_val:.1f} mm",
-    )
+        label=f"Storm Hans ({event_date_actual.date()}): {event_val:.1f} mm",)
     ax.legend(fontsize=12, loc="upper left", frameon=False)
 
     ax.set_title(
         f"A)  Weighted Catchment {acc_label.capitalize()} Accumulated Precipitation Time Series",
         loc="left", x=-0.10, pad=12, fontsize=14, fontweight="normal",)
-    
+
     ax.set_ylabel(f"{acc_label} Accumulation (mm)")
     ax.set_xlim(ts.index[0], ts.index[-1])
     ax.set_ylim(bottom=0)
@@ -126,30 +117,40 @@ def make_figure(
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 
-    # ── Panel B: Return-period plot ───────────────────────────────────────────
+    # ── Panel B: Return-period plot
     ax = axes[1]
 
     ax.scatter(
         emp_T_scatter.values, annual_scatter.values,
         color="steelblue", s=18, zorder=3, alpha=0.85,
-        label="Empirical (Weibull PP)",
-    )
+        label="Empirical (Weibull PP)",)
     ax.plot(T_curve, x_curve, color="black", linewidth=1.5, zorder=4, label="GEV fit")
 
     ax.axhline(event_val, color="black", linestyle="--", linewidth=0.9, zorder=2)
-    ax.axvline(event_T,   color="black", linestyle="--", linewidth=0.9, zorder=2)
 
-    ax.plot(
-        event_T, event_val, "o", color="red", markersize=8, zorder=5,
-        label=f"Storm Hans: T ≈ {event_T_rounded} yr",
-    )
+    # Only draw the vertical return-period line if T is finite
+    if np.isfinite(event_T):
+        ax.axvline(event_T, color="black", linestyle="--", linewidth=0.9, zorder=2)
+        ax.plot(
+            event_T, event_val, "o", color="red", markersize=8, zorder=5,
+            label=f"Storm Hans: {event_T_str}",)
+    else:
+        # Event is beyond the plotted x-range; use legend-only marker + annotation
+        ax.plot(
+            [], [], "o", color="red", markersize=8,
+            label=f"Storm Hans: {event_T_str}",)
+        ax.annotate(
+            f"{event_val:.1f} mm  ({event_T_str})",
+            xy=(2000, event_val),
+            xytext=(-10, 6), textcoords="offset points",
+            ha="right", fontsize=10, color="red",)
 
     ax.set_xscale("log")
     ax.set_title(
         f"B)  Weighted Catchment {acc_label.capitalize()} Accumulated Precipitation, "
-        f"Return Period Storm Hans: {event_T_rounded} year",
+        f"Return Period Storm Hans: {event_T_title}",
         loc="left", x=-0.10, pad=12, fontsize=14, fontweight="normal",)
-    
+
     ax.set_xlabel("Return Period (years)")
     ax.set_ylabel(f"{acc_label} Accumulation (mm)")
     ax.legend(fontsize=12, loc="upper left", bbox_to_anchor=(0.0, 0.8), frameon=False)
@@ -160,14 +161,12 @@ def make_figure(
     ax.set_xticks(_b_ticks)
     ax.set_xticklabels(
         [str(t) for t in _b_ticks],
-        fontsize=11,
-        fontstyle="normal",
-        rotation=0,
-        ha="center",
-    )
+        fontsize=11, fontstyle="normal", rotation=0, ha="center",)
 
-    # ── Save ──────────────────────────────────────────────────────────────────
+    # Save to all figure roots
     plt.tight_layout(rect=[0, 0, 1, 0.985])
-    fig.savefig(str(out_path), format="pdf", bbox_inches="tight")
+    for out_path in out_paths:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(out_path), format="pdf", bbox_inches="tight")
+        print(f"    [fig]   Saved → {out_path}")
     plt.close(fig)
-    print(f"    [fig]   Saved → {out_path.name}")
