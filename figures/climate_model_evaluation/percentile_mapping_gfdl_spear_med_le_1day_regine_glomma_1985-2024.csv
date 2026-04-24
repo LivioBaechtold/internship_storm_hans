@@ -1,0 +1,8 @@
+climate_model,target_percentile_%,climate_value_mm,senorge_percentile_%,era5_0.25_percentile_%,era5_0.5_percentile_%
+gfdl_spear_med_le,2.5,16.0,2.5,0.0,0.0
+gfdl_spear_med_le,5.0,17.0,2.5,2.5,2.5
+gfdl_spear_med_le,16.0,19.8,15.0,20.0,20.0
+gfdl_spear_med_le,50.0,24.7,57.5,55.0,55.0
+gfdl_spear_med_le,84.0,31.3,80.0,80.0,77.5
+gfdl_spear_med_le,95.0,37.9,92.5,90.0,90.0
+gfdl_spear_med_le,97.5,40.5,95.0,95.0,95.0

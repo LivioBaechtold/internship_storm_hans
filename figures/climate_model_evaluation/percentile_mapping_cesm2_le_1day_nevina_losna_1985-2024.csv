@@ -1,0 +1,8 @@
+climate_model,target_percentile_%,climate_value_mm,senorge_percentile_%,era5_0.25_percentile_%,era5_0.5_percentile_%
+cesm2_le,2.5,18.2,2.5,10.0,10.0
+cesm2_le,5.0,19.1,5.0,10.0,10.0
+cesm2_le,16.0,21.3,17.5,25.0,25.0
+cesm2_le,50.0,25.8,37.5,52.5,52.5
+cesm2_le,84.0,32.4,75.0,70.0,70.0
+cesm2_le,95.0,38.8,87.5,85.0,82.5
+cesm2_le,97.5,41.8,95.0,92.5,95.0

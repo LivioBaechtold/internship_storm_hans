@@ -89,35 +89,3 @@ def estimate_return_period(event_value: float,
     """
     exceedance = 1.0 - genextreme.cdf(event_value, c, loc=loc, scale=scale)
     return np.inf if exceedance <= 0 else 1.0 / exceedance
-
-# Define Ensemble helpers ───────────────────────────────────────────────────────────
-def combine_member_annual_maxima(
-    member_annual_maxima: list[pd.Series],) -> pd.Series:
-    """
-    Build one annual-max series for a SMILE dataset using your new definition:
-
-    For each calendar year:
-        take the maximum across ALL ensemble members and ALL days in that year
-
-    Input
-    -----
-    member_annual_maxima: list of pd.Series
-        One Series per member, indexed by year, values = annual maximum of that member
-
-    Returns
-    -------
-    pd.Series
-        Indexed by year
-        Length = number of years in the selected window, not n_members * n_years
-    """
-    if not member_annual_maxima:
-        raise ValueError("member_annual_maxima is empty.")
-
-    combined = pd.concat(member_annual_maxima, axis=1)
-    combined = combined.sort_index()
-
-    annual_max_yearly = combined.max(axis=1, skipna=True).dropna()
-    annual_max_yearly.index.name = "year"
-    annual_max_yearly.name = "annual_max_yearly"
-
-    return annual_max_yearly

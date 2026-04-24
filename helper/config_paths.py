@@ -6,7 +6,7 @@ Path-building functions and directory basis
 from pathlib import Path
 
 # ── Fixed base directories (never change these) ────────────────────────────────
-ERA5_RAW_DIR       = Path("/nird/datapeak/NS9873K/etdu/raw/era5/continuous-format/europe/daily/tp24/")
+ERA5_RAW_DIR       = Path("/nird/datapeak/NS9873K/etdu/raw/era5/continuous-format/daily/europe/tp24/")
 CATCHMENT_RAW_DIR  = Path("/nird/datalake/NS9873K/etdu/raw/nve/")
 SENORGE_RAW_DIR    = Path("/nird/datapeak/NS9873K/DATA/senorge/rr/")   # reserved for future use
 GEOJSON_DIR        = CATCHMENT_RAW_DIR     # adjust if GeoJSONs live elsewhere
@@ -123,59 +123,56 @@ def figure_paths(dataset: str, resolution: str, window_days: int,
 
 
 # Define SMILE-specific path builders ───────────────────────────────────────────────
-def smile_member_postproc_path(
-    dataset:        str,
-    window_days:    int,
-    member_id:      str,
-    catchment_slug: str,
-    start_year:     int,
-    end_year:       int,
-) -> Path:
-    """Cache path for one ensemble member's 1-D catchment-mean time series."""
-    fname = (
-        f"post_processed_{dataset}_{acc_tag(window_days)}_"
-        f"{catchment_slug}_member{member_id}_{start_year}-{end_year}.nc"
-    )
-    return POSTPROC_DIR / dataset / f"{start_year}-{end_year}" / fname
+def smile_member_postproc_path(dataset, window_days, member_id, catchment_slug, start_year, end_year):
+    fname = (f"post_processed_{dataset}_{acc_tag(window_days)}_{catchment_slug}_member{member_id}_{start_year}-{end_year}.nc")
+    return POSTPROC_DIR / dataset / fname   # ← flat, no subfolder
 
 
-def smile_yearmax_stats_path(
-    dataset:        str,
-    window_days:    int,
-    catchment_slug: str,
-    start_year:     int,
-    end_year:       int,
-) -> Path:
+def smile_yearmax_stats_path(dataset, window_days, catchment_slug, start_year, end_year):
+    fname = (f"yearmax_stats_{dataset}_{acc_tag(window_days)}_{catchment_slug}_{start_year}-{end_year}.nc")
+    return POSTPROC_DIR / dataset / fname   # ← flat, no subfolder
+
+def smile_reference_tag(reference_dataset: str, reference_resolution: str) -> str:
     """
-    Cache path for SMILE yearly-max statistics used by the single-panel
-    return-period plots.
+    Short, stable tag used in SMILE PDF filenames.
+
+    Examples
+    --------
+    era5 + 0.5x0.5   -> era5_0.5
+    era5 + 0.25x0.25 -> era5_0.25
+    senorge + ""     -> senorge
     """
-    fname = (
-        f"yearmax_stats_{dataset}_{acc_tag(window_days)}_"
-        f"{catchment_slug}_{start_year}-{end_year}.nc"
-    )
-    return POSTPROC_DIR / dataset / f"{start_year}-{end_year}" / fname
+    if reference_dataset == "senorge":
+        return "senorge"
+
+    if reference_dataset == "era5":
+        if reference_resolution == "0.5x0.5":
+            return "era5_0.5"
+        if reference_resolution == "0.25x0.25":
+            return "era5_0.25"
+
+    return res_tag(reference_dataset, reference_resolution)
 
 
 def smile_figure_paths(
-    dataset:        str,
-    window_days:    int,
-    catchment_slug: str,
-    start_year:     int,
-    end_year:       int,
-    fig_subdir:     str,
-    reference_mode: str,
+    dataset:              str,
+    window_days:          int,
+    catchment_slug:       str,
+    start_year:           int,
+    end_year:             int,
+    fig_subdir:           str,
+    reference_dataset:    str,
+    reference_resolution: str,
 ) -> list:
     """
-    Return PDF save paths for both figure roots (SMILE figures).
-
-    reference_mode:
-        "ref_precip"       -> ERA5 Hans precipitation as reference
-        "ref_returnperiod" -> ERA5 Hans return period as reference
+    Return PDF save paths for both figure roots (SMILE figures),
+    with the actual reference dataset encoded in the filename.
     """
+    ref_tag = smile_reference_tag(reference_dataset, reference_resolution)
+
     fname = (
         f"timeseries_returnperiod_hans_{dataset}_{acc_tag(window_days)}_"
-        f"{catchment_slug}_{start_year}-{end_year}_{reference_mode}.pdf"
+        f"{catchment_slug}_{start_year}-{end_year}_ref_{ref_tag}.pdf"
     )
     return [
         FIGURES_DIR           / fig_subdir / fname,
