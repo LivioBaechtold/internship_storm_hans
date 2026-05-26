@@ -51,8 +51,11 @@ def load_era5_precipitation(era5_files: list[Path]) -> xr.DataArray:
     ds = xr.open_mfdataset([str(f) for f in era5_files], combine="by_coords", coords="minimal", compat="override", chunks={"time": 365},)
 
     # If an unnecessary singleton ensemble/member dimension exists, remove it
-    if "number" in ds.dims and ds.sizes["number"] == 1:
-        ds = ds.isel(number=0, drop=True)
+    for _dim in ("number", "ensemble", "ens"):
+        if _dim in ds.dims and ds.sizes[_dim] == 1:
+            ds = ds.isel({_dim: 0}, drop=True)
+        elif _dim in ds.coords:
+            ds = ds.drop_vars(_dim)
 
     da = ds["tp24"] * 1000.0    # meters → millimeters
     da.attrs["units"] = "mm"
@@ -125,3 +128,30 @@ def select_single_time_by_day(
             "Expected only one daily field per day."
         )
     return da.isel(time=int(idx[0]), drop=True)
+
+
+#Define a helper function to create a slice object that respects the coordinate order (ascending or descending)
+def coord_slice(coord: "xr.DataArray", lower: float, upper: float) -> slice:
+    """
+    Return a slice that respects ascending or descending coordinate order.
+    Handles ERA5 latitude which is stored top-to-bottom (descending).
+    """
+    values = coord.values
+    if values[0] <= values[-1]:
+        return slice(lower, upper)
+    return slice(upper, lower)
+
+
+def pick_year_file(files: list[Path], year: int) -> Path:
+    """
+    Pick one annual file from a sorted list based on a 4-digit year in the filename.
+    Matches patterns like: tp24_0.5x0.5_2023.nc  or  rr_2023.nc
+    """
+    year_pattern = re.compile(rf"(^|_){year}\.nc$")
+    for f in files:
+        if year_pattern.search(f.name):
+            return f
+    raise FileNotFoundError(
+        f"Could not find annual file for year {year} in file list.\n"
+        f"Searched {len(files)} files."
+    )

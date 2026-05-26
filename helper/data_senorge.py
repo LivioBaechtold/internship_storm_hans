@@ -14,6 +14,7 @@ import re
 import xarray as xr
 import numpy as np
 from pathlib import Path
+from pyproj import Transformer
 
 
 def find_senorge_files(senorge_dir: Path) -> list[Path]:
@@ -85,3 +86,42 @@ def get_year_range_senorge(senorge_files: list[Path]) -> tuple[int, int]:
     pattern = re.compile(r"^rr_(\d{4})\.nc$")
     years = [int(pattern.match(f.name).group(1)) for f in senorge_files]
     return min(years), max(years)
+
+# Additional helper for SMILE figure paths 
+
+def latlon_extent_to_utm_bbox(
+    extent: tuple,
+    epsg_dst: str = "EPSG:32633",
+    n_edge: int = 80,
+    pad_m: float = 25_000.0,) -> tuple:
+    """
+    Convert a (west, east, south, north) lat/lon extent to a UTM bounding box
+    suitable for cropping seNorge data.
+
+    Samples many points along the boundary and adds a padding margin so that
+    reprojection distortion at high latitudes does not leave white gaps.
+
+    Returns
+    -------
+    (xmin, xmax, ymin, ymax) in the target projected CRS (metres).
+    """
+    west, east, south, north = extent
+    xs = np.concatenate([
+        np.linspace(west, east, n_edge),
+        np.full(n_edge, east),
+        np.linspace(east, west, n_edge),
+        np.full(n_edge, west),
+    ])
+    ys = np.concatenate([
+        np.full(n_edge, south),
+        np.linspace(south, north, n_edge),
+        np.full(n_edge, north),
+        np.linspace(north, south, n_edge),
+    ])
+    transformer = Transformer.from_crs("EPSG:4326", epsg_dst, always_xy=True)
+    x_utm, y_utm = transformer.transform(xs, ys)
+    return (
+        float(np.nanmin(x_utm) - pad_m),
+        float(np.nanmax(x_utm) + pad_m),
+        float(np.nanmin(y_utm) - pad_m),
+        float(np.nanmax(y_utm) + pad_m),)

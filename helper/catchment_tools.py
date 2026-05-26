@@ -15,7 +15,7 @@ from return_period import get_annual_maxima
 # Define catchment processing helpers ───────────────────────────────────────────────
 def _infer_year_range_from_cache(
     dataset: str, resolution: str, window_days: int) -> tuple:
-    cache_dir = cfg.postproc_dir(dataset)
+    cache_dir = cfg.postproc_dir(dataset) / "catchment_averaged"
     tag = cfg.res_tag(dataset, resolution)
     pat = re.compile(
         rf"^post_processed_{re.escape(tag)}_{window_days}day_"
@@ -308,19 +308,36 @@ def load_postproc_dataset(nc_path: Path) -> xr.Dataset:
 
 
 # ── 2day-rolling accumulation helper ───
-def rolling_accumulation(da: xr.DataArray, window_days: int = 2) -> xr.DataArray:
+# ── Rolling-sum accumulation (works for 1-D catchment series AND 2-D spatial fields) ───
+def rolling_accumulation(
+    da: xr.DataArray,
+    window_days: int = 2,
+    var_name: str = None,
+) -> xr.DataArray:
     """
-    Rolling accumulated precipitation from a daily catchment time series
+    Apply a rolling sum over the 'time' dimension for any DataArray.
 
-    For window_days=2:
-        value(t) = precip(t-1) + precip(t)
+    Works unchanged for:
+      • 1-D catchment-averaged series (used by run_all, SMILE loaders)
+      • 2-D spatial fields (used by map-generation notebooks for e.g. 2-day mean maps)
+
+    Parameters
+    ----------
+    da          : input DataArray with a 'time' dimension
+    window_days : accumulation window length in days
+    var_name    : explicit name for the output DataArray.
+                  If None, the input name (da.name) is preserved.
     """
     out = da.rolling(time=window_days, min_periods=window_days).sum()
-    out.name = f"tp_{window_days}day_catchment_acc"
     out.attrs["units"] = "mm"
-    out.attrs["long_name"] = f"{window_days}-day accumulated weighted catchment precipitation"
+    out.attrs["long_name"] = f"{window_days}-day accumulated precipitation"
+    if var_name is not None:
+        out.name = var_name
+    elif da.name is not None:
+        out.name = da.name
     return out
 
+# Define Check Reasonableness for Series
 def _check_series_reasonableness(
     da: xr.DataArray,
     label: str,
@@ -466,82 +483,7 @@ def _load_or_build_smile_annual_maxima_for_period(
 
     return annual_max_pooled
 
-#Define Annual Max. Loader for Smile Models (for evaluation notebook)
-def load_smile_annual_maxima_for_evaluation(
-    window_days: int,
-    start_year: int | None = None,
-    end_year: int | None = None,
-    force_recompute: bool = False,
-) -> dict:
-    """
-    Load annual maxima for all SMILE and reanalysis models, pooled across all 5 catchments.
-    Used by the climate model evaluation notebook.
-    Returns {model_key: np.ndarray}.
-    """
-    from data_smile import get_year_range_smile
-
-    result = {}
-
-    # Reanalysis models: load full cached series, then subset in time
-    for label, ds, res in [
-        ("era5_0.5",  "era5",    "0.5x0.5"),
-        ("era5_0.25", "era5",    "0.25x0.25"),
-        ("senorge",   "senorge", ""),
-    ]:
-        available_start, available_end = get_cached_year_range(ds, res, window_days)
-        if available_start is None:
-            print(f"[skip] No {window_days}-day cache found for {label}")
-            continue
-
-        use_start, use_end = _validate_requested_years(
-            start_year, end_year, available_start, available_end, label=label
-        )
-
-        vals = []
-        for slug in cfg.CATCHMENTS:
-            nc = cfg.catchment_postproc_path(
-                ds, res, window_days, slug, available_start, available_end
-            )
-            if not nc.exists():
-                print(f"  [skip] {nc.name}")
-                continue
-
-            with xr.open_dataset(str(nc)) as ds_nc:
-                da = subset_time_series_by_year(ds_nc["tp_catchment"], use_start, use_end)
-                am = get_annual_maxima(da)
-                vals.extend(am.values.tolist())
-
-        if vals:
-            result[label] = np.array(vals)
-
-    # SMILE models: load or build pooled annual-max caches for the requested period
-    for ds_key, smile_entry in cfg.SMILE_CONFIG.items():
-        available_start, available_end = get_year_range_smile(smile_entry["model_dir"], ds_key)
-
-        requested_start = start_year if start_year is not None else smile_entry["default_start"]
-        requested_end   = end_year   if end_year   is not None else smile_entry["default_end"]
-
-        use_start, use_end = _validate_requested_years(
-            requested_start, requested_end, available_start, available_end, label=ds_key
-        )
-
-        vals = []
-        for slug in cfg.CATCHMENTS:
-            am = _load_or_build_smile_annual_maxima_for_period(
-                ds_key,
-                window_days,
-                slug,
-                use_start,
-                use_end,
-                force_recompute=force_recompute,
-            )
-            vals.extend(am.values.tolist())
-
-        if vals:
-            result[ds_key] = np.array(vals)
-
-    return result
-
+# Define Annual Max. Loader for Reanalysis Models
 def load_annual_maxima_per_catchment(
     window_days: int,
     start_year: int | None = None,
@@ -1633,3 +1575,32 @@ def compute_distribution_difference(
     return bin_centers, avg_diff, n_pairs
 
 
+# ── Public GeoJSON loader (shared by all notebooks) ───────────────────────────
+
+def load_catchments(geojson_files: dict, geojson_dir: Path = None) -> dict:
+    """
+    Load catchment polygons from GeoJSON files into GeoDataFrames (EPSG:4326).
+
+    Parameters
+    ----------
+    geojson_files : dict  {slug: filename_string}
+    geojson_dir   : Path to the directory containing the GeoJSON files.
+                    Defaults to cfg.GEOJSON_DIR if None.
+
+    Returns
+    -------
+    dict  {slug: gpd.GeoDataFrame}  — all in EPSG:4326.
+    """
+    import geopandas as gpd
+    if geojson_dir is None:
+        geojson_dir = cfg.GEOJSON_DIR
+    out: dict = {}
+    for slug, filename in geojson_files.items():
+        path = geojson_dir / filename
+        gdf = gpd.read_file(str(path))
+        if gdf.crs is None:
+            gdf = gdf.set_crs(epsg=4326, allow_override=True)
+        elif gdf.crs.to_epsg() != 4326:
+            gdf = gdf.to_crs(epsg=4326)
+        out[slug] = gdf
+    return out

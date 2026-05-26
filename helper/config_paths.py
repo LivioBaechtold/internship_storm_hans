@@ -9,12 +9,14 @@ from pathlib import Path
 ERA5_RAW_DIR       = Path("/nird/datapeak/NS9873K/etdu/raw/era5/continuous-format/daily/europe/tp24/")
 CATCHMENT_RAW_DIR  = Path("/nird/datalake/NS9873K/etdu/raw/nve/")
 SENORGE_RAW_DIR    = Path("/nird/datapeak/NS9873K/DATA/senorge/rr/")   # reserved for future use
+ERA5_INTERPOLATED_DIR = Path("/nird/datalake/NS9873K/etdu/raw/era5/scandinavia/tp")
 GEOJSON_DIR        = CATCHMENT_RAW_DIR     # adjust if GeoJSONs live elsewhere
 
 FIGURES_DIR           = Path("/nird/datalake/NS9873K/lbal/figures/")
 FIGURES_DIR_SECONDARY = Path("/nird/home/lbal/internship_storm_hans/figures/")
 POSTPROC_DIR          = Path("/nird/datalake/NS9873K/lbal/postprocessed/")
 WEIGHTS_DIR       = Path("/nird/datalake/NS9873K/lbal/postprocessed/weights")
+OVERALL_PRECIP_EXTENT: tuple = (3.0, 16.0, 56.5, 66.0)  # (west, east, south, north)
 
 
 # ────────────── Define Climatology Models ─────────────────────
@@ -38,8 +40,8 @@ SMILE_CONFIG: dict[str, dict] = {
         "ref_dataset":    "era5",
         "ref_resolution": "0.5x0.5",
         "description":    "CESM2 Large Ensemble",
-        "figure_label":   "CESM2-LE/1°x1°",
-        "tp24_unit_mode": "auto",
+        "figure_label":   "CESM2-LE / 0.942° × 1.25°",
+        "tp24_unit_mode": "already_mm",
     },
     "gfdl_spear_med_le": {
         "model_dir":      GFDL_SPEAR_DIR,
@@ -100,9 +102,9 @@ def postproc_filename(dataset: str, resolution: str, window_days: int,
 
 def catchment_postproc_path(dataset: str, resolution: str, window_days: int,
                              catchment_slug: str, start_year: int, end_year: int) -> Path:
-    """Full path for a postprocessed grid-level NetCDF cache file."""
-    return postproc_dir(dataset) / postproc_filename(
-        dataset, resolution, window_days, catchment_slug, start_year, end_year)
+    """Full path for a postprocessed catchment-averaged NetCDF cache file."""
+    return (postproc_dir(dataset) / "catchment_averaged" / postproc_filename(
+        dataset, resolution, window_days, catchment_slug, start_year, end_year))
 
 def figure_filename(dataset: str, resolution: str, window_days: int,
                     catchment_slug: str, start_year: int, end_year: int) -> str:
@@ -125,12 +127,12 @@ def figure_paths(dataset: str, resolution: str, window_days: int,
 # Define SMILE-specific path builders ───────────────────────────────────────────────
 def smile_member_postproc_path(dataset, window_days, member_id, catchment_slug, start_year, end_year):
     fname = (f"post_processed_{dataset}_{acc_tag(window_days)}_{catchment_slug}_member{member_id}_{start_year}-{end_year}.nc")
-    return POSTPROC_DIR / dataset / fname   # ← flat, no subfolder
+    return POSTPROC_DIR / dataset / "catchment_averaged" / fname
 
 
 def smile_yearmax_stats_path(dataset, window_days, catchment_slug, start_year, end_year):
     fname = (f"yearmax_stats_{dataset}_{acc_tag(window_days)}_{catchment_slug}_{start_year}-{end_year}.nc")
-    return POSTPROC_DIR / dataset / fname   # ← flat, no subfolder
+    return POSTPROC_DIR / dataset / "catchment_averaged" / fname
 
 def smile_reference_tag(reference_dataset: str, reference_resolution: str) -> str:
     """
@@ -178,3 +180,106 @@ def smile_figure_paths(
         FIGURES_DIR           / fig_subdir / fname,
         FIGURES_DIR_SECONDARY / fig_subdir / fname,
     ]
+
+# ── Overall-precipitation (spatial 2-D) path builders ─────────────────────────
+# ERA5 / SeNorge  : one file per dataset/resolution covering full available period.
+# SMILE models    : one file per member covering full available period.
+
+def overall_precip_path(dataset: str, resolution: str,
+                        start_year: int, end_year: int) -> Path:
+    """
+    Cache path for the spatially-cropped overall daily precipitation field.
+    All datasets (including SeNorge) now store daily values.
+
+    Examples
+    --------
+    era5, 0.5x0.5,  1941, 2024 → overall_precipitation/post_processed_era5_0.5x0.5_1day_1941-2024.nc
+    senorge, '',    1957, 2024 → overall_precipitation/post_processed_senorge_1day_1957-2024.nc
+    """
+    if dataset == "senorge":
+        fname = f"post_processed_senorge_1day_{start_year}-{end_year}.nc"
+    else:
+        tag = res_tag(dataset, resolution)
+        fname = f"post_processed_{tag}_1day_{start_year}-{end_year}.nc"
+    return POSTPROC_DIR / dataset / "overall_precipitation" / fname
+
+
+def overall_precip_member_path(dataset: str, member_id: str,
+                                start_year: int, end_year: int) -> Path:
+    """
+    Cache path for one SMILE member's spatially-cropped daily precipitation field.
+
+    Example
+    -------
+    cesm2_le, '001', 1920, 2034
+        → overall_precipitation/post_processed_cesm2_le_1day_member001_1920-2034.nc
+    """
+    fname = f"post_processed_{dataset}_1day_member{member_id}_{start_year}-{end_year}.nc"
+    return POSTPROC_DIR / dataset / "overall_precipitation" / fname
+
+# ── Overview-map figure path builders ─────────────────────────────────────────
+
+def precip_map_figure_paths(fig_subdir: str, fname: str) -> list:
+    """
+    Return [primary_path, secondary_path] for any overview precipitation map figure.
+
+    Example
+    -------
+    precip_map_figure_paths("precip_maps_hans", "annualmean_precip_1995-2024.pdf")
+    """
+    return [
+        FIGURES_DIR           / fig_subdir / fname,
+        FIGURES_DIR_SECONDARY / fig_subdir / fname,
+    ]
+
+
+def annmedian_precip_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the 4-panel annual median precipitation figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"annualmedian_precip_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_precip_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the 2-panel 2-day median precipitation figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_precip_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_3panel_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the 3-panel 2-day median vs ERA5-interpolated + difference figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_3panel_interpera5_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_diff_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the single-panel 2-day median difference figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_diff_interpera5_{start_year}-{end_year}.pdf"
+    )
+
+def twodayp90_3panel_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the 3-panel 2-day 90th-percentile figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2dayp90_3panel_interpera5_{start_year}-{end_year}.pdf"
+    )
+
+def twodayp90_diff_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the single-panel 2-day 90th-percentile difference figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2dayp90_diff_interpera5_{start_year}-{end_year}.pdf"
+    )
+
+def cesm2_annmedian_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for the CESM2-LE 100-member median of the annual-total spatial field."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"annmedian_median_cesm2le_{start_year}-{end_year}.nc")
+
+def cesm2_2day_annmedian_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for the CESM2-LE 100-member median 2-day median spatial field."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"annmedian_2day_median_cesm2le_{start_year}-{end_year}.nc")
+
+def cesm2_2day_p90_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for the CESM2-LE 100-member median 2-day 90th-percentile spatial field."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"p90_2day_median_cesm2le_{start_year}-{end_year}.nc")

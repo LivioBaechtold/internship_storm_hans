@@ -715,3 +715,68 @@ def make_distribution_difference_figure(
         fig.savefig(str(out_path), format="pdf", bbox_inches="tight")
         print(f"    [fig]   Saved → {out_path}")
     plt.close(fig)
+
+
+# ── Numbered-catchment map helper ─────────────────────────────────────────────
+def draw_catchments_numbered(
+    ax,
+    catchments: dict,
+    data_crs,
+    catchment_numbers: dict,
+    edge_color: str = "red",
+    linewidth: float = 1.2,
+    fontsize: int = 9,
+    zorder: int = 4,
+    position_overrides: dict = None,
+) -> None:
+    """
+    Draw catchment outlines with a circled number at each representative point.
+
+    Parameters
+    ----------
+    catchment_numbers   : dict  {slug: int}  — e.g. {"nevina_bergheim": 1, ...}
+    position_overrides  : dict  {slug: (lon, lat)}  — override label position in
+                          geographic coordinates (EPSG:4326) for specific catchments.
+                          If None, the representative point is used for all catchments.
+    """
+    overrides = position_overrides or {}
+
+    for slug, gdf in catchments.items():
+        num = catchment_numbers.get(slug, "?")
+
+        ax.add_geometries(
+            gdf.geometry,
+            crs=data_crs,
+            facecolor="none",
+            edgecolor=edge_color,
+            linewidth=linewidth,
+            zorder=zorder,)
+
+        if slug in overrides:
+            lon, lat = overrides[slug]
+        else:
+            try:
+                geom = gdf.geometry.union_all()
+            except AttributeError:
+                geom = gdf.geometry.unary_union
+            pt = geom.representative_point()
+            lon, lat = pt.x, pt.y
+
+        ax.annotate(
+            str(num),
+            xy=(lon, lat),
+            xycoords=data_crs._as_mpl_transform(ax),
+            xytext=(0, -2.5),
+            textcoords="offset points",
+            ha="center", va="center",
+            fontsize=fontsize,
+            fontweight="bold",
+            color=edge_color,
+            bbox=dict(
+                boxstyle="circle,pad=0.25",
+                facecolor="white",
+                edgecolor=edge_color,
+                linewidth=0.9,
+                alpha=0.88,
+            ),
+            zorder=zorder + 1,)
