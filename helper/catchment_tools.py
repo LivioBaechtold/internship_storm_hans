@@ -251,7 +251,6 @@ def compute_catchment_mean(precip_da: xr.DataArray,
 
     return catchment_mean
 
-
 # ── Cache helpers ───
 def crop_to_weight_bbox(
     precip_da: xr.DataArray,
@@ -306,6 +305,134 @@ def load_postproc_dataset(nc_path: Path) -> xr.Dataset:
     """Load a cached postprocessed grid-level Dataset."""
     return xr.open_dataset(str(nc_path))
 
+# ── Spatial-cache I/O helpers ─────────────────────────────────────────────────
+
+def _chunksizes_for(da: xr.DataArray, time_chunk: int,
+                    y_chunk: int, x_chunk: int) -> tuple:
+    """Return NetCDF chunksizes aligned to da.dims order."""
+    mapping = {"time": time_chunk,
+               "Y": y_chunk, "latitude": y_chunk, "lat": y_chunk,
+               "X": x_chunk, "longitude": x_chunk, "lon": x_chunk}
+    return tuple(min(int(da.sizes[d]), mapping.get(d, int(da.sizes[d])))
+                 for d in da.dims)
+
+
+def save_spatial_netcdf(da: xr.DataArray, out_path: Path, var_name: str,
+                        time_chunk: int, y_chunk: int, x_chunk: int,
+                        units: str = "mm") -> None:
+    """Write one float32 spatial variable to a compressed, chunked NetCDF file.
+
+    units : metadata unit string written to the variable (default 'mm';
+            pass 'kg/m2' for SWE / soil-moisture fields).
+    """
+    da = da.astype("float32")
+    da.name = var_name
+    da.attrs["units"] = units
+    chunksizes = _chunksizes_for(da, time_chunk, y_chunk, x_chunk)
+    chunk_map = dict(zip(da.dims, chunksizes))
+    da = da.chunk(chunk_map)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    da.to_dataset(name=var_name).to_netcdf(
+        str(out_path), mode="w", format="NETCDF4",
+        encoding={var_name: {"zlib": True, "complevel": 4,
+                             "dtype": "float32", "chunksizes": chunksizes}})
+    print(f"  [saved] {out_path.name}  ({dict(da.sizes)})")
+
+
+def open_precip_cache(cache_path: Path, start_year: int, end_year: int,
+                      **open_kwargs) -> xr.DataArray:
+    """
+    Open a spatial precipitation cache lazily and subset to [start_year, end_year].
+    Do NOT wrap in a 'with' block — the file handle must remain open for lazy Dask computation.
+    """
+    open_kwargs.setdefault("chunks", {})
+    ds = xr.open_dataset(str(cache_path), **open_kwargs)
+    for varname in ("tp24_mm", "rr_mm"):
+        if varname in ds:
+            return subset_time_series_by_year(ds[varname], start_year, end_year)
+    ds.close()
+    raise KeyError(f"No recognised precipitation variable in {cache_path}")
+
+def open_field_cache(cache_path: Path, var_name: str,
+                     start_year: int, end_year: int, **open_kwargs) -> xr.DataArray:
+    """
+    Open a spatial state-field cache (SWE / soil moisture) lazily and subset to
+    [start_year, end_year]. Generic counterpart of `open_precip_cache` for an
+    explicitly named variable. Do NOT wrap in a 'with' block — the handle must
+    stay open for lazy Dask computation.
+    """
+    open_kwargs.setdefault("chunks", {})
+    ds = xr.open_dataset(str(cache_path), **open_kwargs)
+    if var_name not in ds:
+        ds.close()
+        raise KeyError(f"Variable {var_name!r} not found in {cache_path}")
+    return subset_time_series_by_year(ds[var_name], start_year, end_year)
+
+
+def _spatial_dims(da: xr.DataArray) -> tuple[str, str]:
+    """Return the (y_dim, x_dim) name pair for a spatial DataArray."""
+    for y, x in [("latitude", "longitude"), ("lat", "lon"), ("Y", "X")]:
+        if y in da.dims and x in da.dims:
+            return y, x
+    raise ValueError(f"Unsupported weight-grid dimensions: {da.dims}")
+
+
+def crop_weight_field_to_nonzero_bbox(da: xr.DataArray,
+                                      pad_cells: int = 1) -> xr.DataArray:
+    """Crop a weight DataArray to the bounding box of its positive cells plus padding."""
+    y_dim, x_dim = _spatial_dims(da)
+    valid = np.isfinite(da.values) & (da.values > 0)
+    if not valid.any():
+        raise ValueError("No positive weights found — check the weight file.")
+    iy, ix = np.where(valid)
+    y0 = max(0, int(iy.min()) - pad_cells)
+    y1 = min(da.sizes[y_dim] - 1, int(iy.max()) + pad_cells)
+    x0 = max(0, int(ix.min()) - pad_cells)
+    x1 = min(da.sizes[x_dim] - 1, int(ix.max()) + pad_cells)
+    return da.isel({y_dim: slice(y0, y1 + 1), x_dim: slice(x0, x1 + 1)})
+
+
+def _mean_step(coord: xr.DataArray, fallback: float) -> float:
+    """Mean absolute step size along a coordinate array."""
+    vals = np.asarray(coord.values)
+    if vals.size < 2:
+        return fallback
+    return float(np.abs(np.diff(vals)).mean())
+
+
+def get_plot_extent_and_crs(da: xr.DataArray):
+    """
+    Infer a tight map extent and CRS from a spatial DataArray.
+    Returns (extent_list, cartopy_crs).
+    Supports latitude/longitude, lat/lon, and Y/X (UTM) grids.
+    """
+    import cartopy.crs as ccrs
+    if {"longitude", "latitude"}.issubset(da.dims):
+        dx = _mean_step(da["longitude"], 0.25)
+        dy = _mean_step(da["latitude"], 0.25)
+        extent = [float(da["longitude"].min()) - 0.5*dx,
+                  float(da["longitude"].max()) + 0.5*dx,
+                  float(da["latitude"].min())  - 0.5*dy,
+                  float(da["latitude"].max())  + 0.5*dy]
+        return extent, ccrs.PlateCarree()
+    if {"lon", "lat"}.issubset(da.dims):
+        dx = _mean_step(da["lon"], 0.25)
+        dy = _mean_step(da["lat"], 0.25)
+        extent = [float(da["lon"].min()) - 0.5*dx,
+                  float(da["lon"].max()) + 0.5*dx,
+                  float(da["lat"].min()) - 0.5*dy,
+                  float(da["lat"].max()) + 0.5*dy]
+        return extent, ccrs.PlateCarree()
+    if {"X", "Y"}.issubset(da.dims):
+        dx = _mean_step(da["X"], 1000.0)
+        dy = _mean_step(da["Y"], 1000.0)
+        extent = [float(da["X"].min()) - 0.5*dx,
+                  float(da["X"].max()) + 0.5*dx,
+                  float(da["Y"].min()) - 0.5*dy,
+                  float(da["Y"].max()) + 0.5*dy]
+        return extent, ccrs.UTM(zone=33)
+    raise ValueError(f"Unsupported weight-grid dimensions: {da.dims}")
+
 
 # ── 2day-rolling accumulation helper ───
 # ── Rolling-sum accumulation (works for 1-D catchment series AND 2-D spatial fields) ───
@@ -336,6 +463,92 @@ def rolling_accumulation(
     elif da.name is not None:
         out.name = da.name
     return out
+
+
+def rolling_change(
+    da: xr.DataArray,
+    window_days: int = 2,
+    var_name: str = None,
+) -> xr.DataArray:
+    """
+    Rolling 'last minus first' change over a trailing time window.
+
+    The value at time t is da(t) - da(t - (window_days - 1)) — the change across
+    the SAME trailing window that `rolling_accumulation` sums. For window_days=2
+    this is da(t) - da(t-1): the later value minus the earlier one, labelled at
+    the later timestep, mirroring the 2-day rolling sum used for precip
+    (value[t] = P[t-1] + P[t]). The first (window_days-1) entries are NaN, just
+    like the rolling sum.
+
+    Use for state variables such as SWE, where the 2-day quantity is a change
+    (SWE gain positive, melt negative). Units are inherited from `da`
+    (NOT forced to mm).
+    """
+    out = da - da.shift(time=window_days - 1)
+    out.attrs["long_name"] = f"{window_days}-day change (later minus earlier)"
+    if var_name is not None:
+        out.name = var_name
+    elif da.name is not None:
+        out.name = da.name
+    return out
+
+
+def rolling_melt(
+    da: xr.DataArray,
+    window_days: int = 2,
+    var_name: str = None,
+) -> xr.DataArray:
+    """
+    Snowmelt magnitude over a trailing time window: max(0, -ΔSWE).
+
+    The signed change is da(t) - da(t-(window_days-1)) (later minus earlier, the
+    same trailing window as `rolling_change`). Snowmelt is the part of that change
+    where SWE *decreases*, expressed as a POSITIVE quantity:
+
+        melt(t) = max(0, -(da(t) - da(t-(window_days-1))))
+
+    Accumulation (SWE gain) maps to 0, so the field is a melt flux suitable for a
+    snowmelt / compound-flood map: 0 in snow-free seasons, positive during melt,
+    with the flood-relevant signal carried by the 90th percentile. The first
+    (window_days-1) entries are NaN (inherited from the shift). Units are inherited
+    from `da` (NOT forced to mm).
+    """
+    change = da - da.shift(time=window_days - 1)
+    out = (-change).clip(min=0.0)
+    out.attrs["long_name"] = f"{window_days}-day snowmelt = max(0, -ΔSWE)"
+    if var_name is not None:
+        out.name = var_name
+    elif da.name is not None:
+        out.name = da.name
+    return out
+
+
+def rolling_mean(
+    da: xr.DataArray,
+    window_days: int = 2,
+    var_name: str = None,
+) -> xr.DataArray:
+    """
+    Rolling mean over a trailing time window.
+
+    The value at time t is the mean of `da` over [t-(window_days-1), t] — the SAME
+    trailing window that `rolling_accumulation` sums. For window_days=2 this is
+    mean(da(t-1), da(t)): the 2-day rolling average, labelled at the later
+    timestep, mirroring the 2-day rolling sum used for precip. The first
+    (window_days-1) entries are NaN, just like the rolling sum.
+
+    Use for state variables such as soil moisture, where the 2-day quantity is an
+    average wetness (not an accumulation or a change). Units are inherited from
+    `da` (NOT forced to mm).
+    """
+    out = da.rolling(time=window_days, min_periods=window_days).mean()
+    out.attrs["long_name"] = f"{window_days}-day rolling mean"
+    if var_name is not None:
+        out.name = var_name
+    elif da.name is not None:
+        out.name = da.name
+    return out
+
 
 # Define Check Reasonableness for Series
 def _check_series_reasonableness(
@@ -676,7 +889,7 @@ def build_percentile_mapping_table(
 def build_distribution_summary_table(
     annual_maxima: dict[str, np.ndarray],
 ) -> pd.DataFrame:
-    from plot_style import MODEL_ORDER, MODEL_LABELS
+    from config_paths import MODEL_ORDER, MODEL_LABELS
 
     rows = []
     for key in MODEL_ORDER:
@@ -1200,379 +1413,6 @@ def run_all_smile(
             reference_resolution = "0.5x0.5",
         ):
             print(f"  {p.parent}")
-
-
-# ── Distribution Difference helpers ───────────────────────────────────────────
-
-def load_smile_annual_maxima_per_year(
-    dataset: str,
-    window_days: int,
-    catchment_slug: str,
-    start_year: int,
-    end_year: int,
-    force_recompute: bool = False,
-    weight_dir: Path | None = None,
-) -> dict:
-    """
-    Return per-year distributions of annual maxima for one SMILE dataset
-    and one catchment.
-
-    For each calendar year Y in [start_year, end_year]:
-        result[Y] = np.array of shape (n_members,)
-                    — one annual-maximum value per ensemble member.
-
-    If the member-level postprocessed cache files do not yet exist for the
-    requested period they are built from raw data automatically (same logic
-    as run_all_smile), so this function works even on a fresh run.
-
-    Parameters
-    ----------
-    dataset        : SMILE key, e.g. "cesm2_le"
-    window_days    : 1 or 2
-    catchment_slug : slug from cfg.CATCHMENTS
-    start_year     : first year to include
-    end_year       : last year to include
-    force_recompute: if True, always rebuild from raw data
-    weight_dir     : override weight-file search directory
-    """
-    from data_smile import (
-        find_smile_members,
-        find_smile_files_for_member,
-        load_smile_precipitation,
-        get_year_range_smile,
-    )
-    from return_period import get_annual_maxima
-
-    smile_cfg  = cfg.SMILE_CONFIG[dataset]
-    model_dir  = smile_cfg["model_dir"]
-    unit_mode  = smile_cfg.get("tp24_unit_mode", "auto")
-    members    = find_smile_members(model_dir, dataset)
-
-    # Full available range — used for cache file paths
-    avail_start, avail_end = get_year_range_smile(model_dir, dataset)
-
-    # Validate requested analysis years against full available range
-    start_year, end_year = _validate_requested_years(
-        start_year, end_year, avail_start, avail_end, label=dataset)
-
-    w_dir = weight_dir if weight_dir is not None else cfg.WEIGHTS_DIR
-    weight_path = find_weight_file(dataset, "", catchment_slug, weight_dir=w_dir)
-    weights = load_weights(weight_path)
-
-    # Accumulate one value per (member, year) — only for requested analysis years
-    year_to_vals: dict = {yr: [] for yr in range(start_year, end_year + 1)}
-
-    for member_id in members:
-        # Cache path always keyed to FULL available range (no year subfolder)
-        member_cache = cfg.smile_member_postproc_path(
-            dataset, window_days, member_id, catchment_slug, avail_start, avail_end)
-
-        if (not force_recompute) and member_cache.exists():
-            with xr.open_dataset(str(member_cache), use_cftime=True) as ds_m:
-                da_m = ds_m["tp_catchment"].load()
-        else:
-            print(f"    [raw] Building member {member_id} "
-                  f"({dataset}/{catchment_slug}/{window_days}day) ...")
-
-            # Load full available range; seed year for rolling handled below
-            load_from = avail_start - 1 if window_days > 1 else avail_start
-
-            files = find_smile_files_for_member(
-                model_dir, dataset, member_id, load_from, avail_end)
-            raw_da = load_smile_precipitation(
-                files, load_from, avail_end, unit_mode=unit_mode)
-
-            w_aligned = align_weights_to_precip(raw_da, weights)
-            precip_roi, w_roi = crop_to_weight_bbox(raw_da, w_aligned)
-            precip_masked = precip_roi.where(w_roi > 0)
-            da_daily = compute_catchment_mean(precip_masked, w_roi).load()
-
-            if window_days > 1:
-                da_m = rolling_accumulation(da_daily, window_days).load()
-                # Remove seed year
-                da_m = da_m.isel(time=(da_m.time.dt.year >= avail_start).values)
-            else:
-                da_m = da_daily
-
-            _check_series_reasonableness(
-                da_m,
-                label=f"{dataset}/{catchment_slug}/member_{member_id}",
-                window_days=window_days,
-            )
-
-            ds_out = xr.Dataset({"tp_catchment": da_m})
-            ds_out.attrs.update({
-                "dataset":        dataset,
-                "member":         member_id,
-                "window_days":    window_days,
-                "catchment_slug": catchment_slug,
-                "start_year":     avail_start,
-                "end_year":       avail_end,
-            })
-            save_postproc_dataset(ds_out, member_cache)
-
-        # Extract annual maxima — the year_to_vals loop already filters
-        # to only the requested analysis years, so no explicit subset needed
-        am = get_annual_maxima(da_m)
-        for yr in range(start_year, end_year + 1):
-            if yr in am.index:
-                year_to_vals[yr].append(float(am.loc[yr]))
-
-    return {
-        yr: np.array(vals)
-        for yr, vals in year_to_vals.items()
-        if len(vals) > 0
-    }
-
-# Define a loader for the reference values of the Hans event in the reanalysis datasets, to be used in the distribution difference analysis
-def load_reanalysis_values_per_year(
-    dataset: str,
-    resolution: str,
-    window_days: int,
-    catchment_slug: str,
-    start_year: int | None = None,
-    end_year: int | None = None,
-    data_type: str = "annual_max",   # "annual_max" or "daily"
-) -> dict:
-    """
-    Load per-year data from a cached reanalysis dataset (ERA5 or SeNorge).
-
-    Returns
-    -------
-    dict[int, np.ndarray]
-        data_type == "annual_max" → {year: array([single_max_value])}
-        data_type == "daily"      → {year: array(all_finite_daily_values)}
-
-    This is structurally identical to what load_smile_annual_maxima_per_year
-    produces, so compute_distribution_difference works unchanged on the output.
-    """
-    available_start, available_end = get_cached_year_range(dataset, resolution, window_days)
-    if available_start is None:
-        raise FileNotFoundError(
-            f"No {window_days}-day cache found for {dataset}/{resolution}.\n"
-            f"Run the reanalysis pipeline first."
-        )
-
-    use_start, use_end = _validate_requested_years(
-        start_year, end_year, available_start, available_end,
-        label=f"{dataset}/{resolution}",
-    )
-
-    nc = cfg.catchment_postproc_path(
-        dataset, resolution, window_days, catchment_slug,
-        available_start, available_end,
-    )
-    if not nc.exists():
-        raise FileNotFoundError(f"Cache file not found:\n  {nc}")
-
-    with xr.open_dataset(str(nc)) as ds_nc:
-        da = subset_time_series_by_year(ds_nc["tp_catchment"], use_start, use_end)
-        da = da.load()
-
-    result: dict = {}
-    for year in range(use_start, use_end + 1):
-        year_mask = da.time.dt.year == year
-        da_yr = da.isel(time=year_mask.values)
-        vals = da_yr.values
-        vals = vals[np.isfinite(vals)]
-        if vals.size == 0:
-            continue
-        if data_type == "annual_max":
-            result[year] = np.array([float(vals.max())])
-        else:                            # "daily"
-            result[year] = vals
-
-    return result
-
-
-# Define a loader for the daily (or rolling) values of the Hans event in the reanalysis datasets, to be used in the distribution difference analysis
-def load_smile_daily_values_per_year(
-    dataset: str,
-    window_days: int,
-    catchment_slug: str,
-    start_year: int,
-    end_year: int,
-    force_recompute: bool = False,
-    weight_dir: Path | None = None,
-) -> dict:
-    """
-    Load per-year daily (or rolling) precipitation values for a SMILE dataset,
-    concatenated across all ensemble members.
-
-    Returns
-    -------
-    dict[int, np.ndarray]
-        {year: array of all finite daily values across ALL members for that year}
-
-    This parallels load_smile_annual_maxima_per_year but keeps every daily
-    value instead of only the per-member annual maximum.  The result feeds
-    directly into compute_distribution_difference for the "daily" analysis.
-    """
-    from data_smile import (
-        find_smile_members,
-        find_smile_files_for_member,
-        load_smile_precipitation,
-        get_year_range_smile,)
-
-    smile_cfg  = cfg.SMILE_CONFIG[dataset]
-    model_dir  = smile_cfg["model_dir"]
-    unit_mode  = smile_cfg.get("tp24_unit_mode", "auto")
-    members    = find_smile_members(model_dir, dataset)
-
-    avail_start, avail_end = get_year_range_smile(model_dir, dataset)
-    start_year, end_year   = _validate_requested_years(
-        start_year, end_year, avail_start, avail_end, label=dataset)
-
-    w_dir       = weight_dir if weight_dir is not None else cfg.WEIGHTS_DIR
-    weight_path = find_weight_file(dataset, "", catchment_slug, weight_dir=w_dir)
-    weights     = load_weights(weight_path)
-
-    year_to_vals: dict = {yr: [] for yr in range(start_year, end_year + 1)}
-
-    for member_id in members:
-        member_cache = cfg.smile_member_postproc_path(
-            dataset, window_days, member_id, catchment_slug, avail_start, avail_end)
-
-        if (not force_recompute) and member_cache.exists():
-            with xr.open_dataset(str(member_cache), use_cftime=True) as ds_m:
-                da_m = ds_m["tp_catchment"].load()
-        else:
-            print(f"    [raw] Building member {member_id} "
-                  f"({dataset}/{catchment_slug}/{window_days}day) ...")
-            load_from = avail_start - 1 if window_days > 1 else avail_start
-            files = find_smile_files_for_member(
-                model_dir, dataset, member_id, load_from, avail_end)
-            raw_da = load_smile_precipitation(
-                files, load_from, avail_end, unit_mode=unit_mode)
-            w_aligned = align_weights_to_precip(raw_da, weights)
-            precip_roi, w_roi = crop_to_weight_bbox(raw_da, w_aligned)
-            precip_masked = precip_roi.where(w_roi > 0)
-            da_daily = compute_catchment_mean(precip_masked, w_roi).load()
-            if window_days > 1:
-                da_m = rolling_accumulation(da_daily, window_days).load()
-                da_m = da_m.isel(time=(da_m.time.dt.year >= avail_start).values)
-            else:
-                da_m = da_daily
-            _check_series_reasonableness(
-                da_m,
-                label=f"{dataset}/{catchment_slug}/member_{member_id}",
-                window_days=window_days,
-            )
-            ds_out = xr.Dataset({"tp_catchment": da_m})
-            ds_out.attrs.update({
-                "dataset": dataset, "member": member_id,
-                "window_days": window_days, "catchment_slug": catchment_slug,
-                "start_year": avail_start, "end_year": avail_end,
-            })
-            save_postproc_dataset(ds_out, member_cache)
-
-        # Collect daily values year-by-year (analysis window only)
-        for yr in range(start_year, end_year + 1):
-            year_mask = da_m.time.dt.year == yr
-            da_yr = da_m.isel(time=year_mask.values)
-            vals = da_yr.values
-            vals = vals[np.isfinite(vals)]
-            year_to_vals[yr].extend(vals.tolist())
-
-    return {
-        yr: np.array(vals)
-        for yr, vals in year_to_vals.items()
-        if len(vals) > 0}
-
-
-# Define function to create distribution difference Plots and analysis
-def compute_distribution_difference(
-    per_year_data: dict,
-    window_before: int,
-    window_after: int,
-    bin_width_mm: float = 5.0,
-) -> tuple:
-    """
-    Compute the average normalised-histogram difference (after − before) over
-    all non-overlapping consecutive window pairs in the time series.
-
-    Pairing logic — no year is used twice:
-        step = window_before + window_after
-        pair k:  before = years[ k*step           : k*step + window_before ]
-                 after  = years[ k*step+window_before : (k+1)*step         ]
-
-    For each pair:
-        1. Collect all member-year values in the "before" window.
-        2. Collect all member-year values in the "after"  window.
-        3. Build normalised frequency histograms over shared bin edges.
-        4. difference = after_hist − before_hist  (element-wise, sums to ≈ 0)
-
-    Average all pair differences → one scalar per bin.
-
-    Parameters
-    ----------
-    per_year_data   : dict[int, np.ndarray]  — output of load_smile_annual_maxima_per_year
-    window_before   : number of years in the "before" half of each pair
-    window_after    : number of years in the "after"  half of each pair
-    bin_width_mm    : histogram bin width in mm.
-                      5 mm gives ~16 bins for 1-day data (range ≈10–90 mm)
-                      and ~25 bins for 2-day data (range ≈15–140 mm).
-                      Wide enough so each bin holds multiple values even for
-                      the smallest window (e.g. GFDL-SPEAR: 30 members × 1 yr
-                      = 30 values → still ≥ 1–2 values per 5 mm bin on average).
-
-    Returns
-    -------
-    bin_centers : np.ndarray
-    avg_diff    : np.ndarray  (same length; values nominally in [−1, +1])
-    n_pairs     : int         (number of non-overlapping pairs averaged)
-    """
-    years = sorted(per_year_data.keys())
-    step  = window_before + window_after
-    n_years = len(years)
-
-    # Global bin edges derived from the full data range so all pairs share
-    # the same axis — essential for a meaningful average difference
-    all_vals = np.concatenate(list(per_year_data.values()))
-    all_vals = all_vals[np.isfinite(all_vals)]
-    if all_vals.size == 0:
-        return np.array([]), np.array([]), 0
-
-    global_min = float(np.floor(all_vals.min() / bin_width_mm) * bin_width_mm)
-    global_max = float(np.ceil(all_vals.max()  / bin_width_mm) * bin_width_mm) + bin_width_mm
-    bin_edges  = np.arange(
-        global_min, global_max + bin_width_mm * 0.5, bin_width_mm
-    )
-    bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
-
-    diffs = []
-    i = 0
-    while i + step <= n_years:
-        before_years = years[i                : i + window_before]
-        after_years  = years[i + window_before: i + step]
-
-        before_vals = np.concatenate([per_year_data[y] for y in before_years])
-        after_vals  = np.concatenate([per_year_data[y] for y in after_years])
-        before_vals = before_vals[np.isfinite(before_vals)]
-        after_vals  = after_vals[np.isfinite(after_vals)]
-
-        if before_vals.size == 0 or after_vals.size == 0:
-            i += step
-            continue
-
-        h_before, _ = np.histogram(before_vals, bins=bin_edges)
-        h_after,  _ = np.histogram(after_vals,  bins=bin_edges)
-
-        # Normalise to probability mass (each histogram sums to 1)
-        if h_before.sum() > 0:
-            h_before = h_before / h_before.sum()
-        if h_after.sum() > 0:
-            h_after  = h_after  / h_after.sum()
-
-        diffs.append(h_after.astype(float) - h_before.astype(float))
-        i += step
-
-    n_pairs = len(diffs)
-    if n_pairs == 0:
-        return bin_centers, np.zeros_like(bin_centers), 0
-
-    avg_diff = np.mean(diffs, axis=0)
-    return bin_centers, avg_diff, n_pairs
 
 
 # ── Public GeoJSON loader (shared by all notebooks) ───────────────────────────

@@ -125,3 +125,92 @@ def latlon_extent_to_utm_bbox(
         float(np.nanmax(x_utm) + pad_m),
         float(np.nanmin(y_utm) - pad_m),
         float(np.nanmax(y_utm) + pad_m),)
+
+# ── Overall-precipitation spatial-cache builders ───────────────────────────────
+
+def save_senorge_overall(
+    senorge_dir: Path,
+    out_path_fn,
+    extent: tuple,
+    force: bool = False,
+) -> None:
+    """
+    Build and save the spatially-cropped daily seNorge precipitation cache.
+
+    Parameters
+    ----------
+    out_path_fn : callable(dataset, resolution, start_year, end_year) -> Path
+                  e.g. cfg.overall_precip_path  (will be called with dataset="senorge", resolution="")
+    extent      : (west, east, south, north) in degrees
+    """
+    from catchment_tools import save_spatial_netcdf
+    files = find_senorge_files(senorge_dir)
+    start_year, end_year = get_year_range_senorge(files)
+    out_path = out_path_fn("senorge", "", start_year, end_year)
+
+    if (not force) and out_path.exists():
+        print(f"  [skip] SeNorge cache exists: {out_path.name}")
+        return
+
+    print(f"  Building SeNorge DAILY cache ({start_year}–{end_year}) ...")
+    xmin, xmax, ymin, ymax = latlon_extent_to_utm_bbox(extent)
+
+    ds = xr.open_mfdataset(
+        [str(f) for f in files], combine="by_coords", coords="minimal",
+        compat="override", mask_and_scale=False,
+        chunks={"time": 31, "Y": 256, "X": 256})
+    try:
+        da = ds["rr"].sel(
+            X=slice(xmin, xmax), Y=slice(ymin, ymax)).astype("float32")
+        da = da.where(da != np.float32(-999.99)).sortby("time")
+        save_spatial_netcdf(da, out_path, "rr_mm",
+                            time_chunk=31, y_chunk=256, x_chunk=256)
+    finally:
+        ds.close()
+
+
+def compute_senorge_annual_median_2d(
+    start_year: int,
+    end_year: int,
+    senorge_dir: Path,
+    cache_path_fn,
+    open_cache_fn,
+) -> "xr.DataArray":
+    """Annual median daily precipitation (mm/year) from seNorge overall cache."""
+    files = find_senorge_files(senorge_dir)
+    avail_s, avail_e = get_year_range_senorge(files)
+    cache = cache_path_fn("senorge", "", avail_s, avail_e)
+    if not cache.exists():
+        raise FileNotFoundError(f"SeNorge overall cache not found.\n{cache}")
+    print(f"  Loading SeNorge from cache ({start_year}–{end_year}) ...")
+    da = open_cache_fn(cache, start_year, end_year)
+    out = da.groupby("time.year").sum(dim="time").median(dim="year")
+    out.name = "annmedian_precip"
+    out.attrs.update({"units": "mm/year",
+                      "start_year": start_year, "end_year": end_year})
+    return out.compute()
+
+
+def compute_senorge_2day_median_2d(
+    start_year: int,
+    end_year: int,
+    senorge_dir: Path,
+    cache_path_fn,
+    open_cache_fn,
+    rolling_fn,
+    subset_fn,
+) -> "xr.DataArray":
+    """
+    Median of 2-day rolling sums (mm) from seNorge overall 1-day cache.
+    rolling_fn : catchment_tools.rolling_accumulation
+    subset_fn  : catchment_tools.subset_time_series_by_year
+    """
+    files = find_senorge_files(senorge_dir)
+    avail_s, avail_e = get_year_range_senorge(files)
+    cache = cache_path_fn("senorge", "", avail_s, avail_e)
+    if not cache.exists():
+        raise FileNotFoundError(f"SeNorge overall cache not found.\n{cache}")
+    print(f"  Loading SeNorge (2-day) from cache ({start_year}–{end_year}) ...")
+    da = open_cache_fn(cache, start_year - 1, end_year)
+    da_2day = rolling_fn(da, window_days=2)
+    return subset_fn(da_2day, start_year, end_year).median(dim="time").compute()

@@ -9,7 +9,10 @@ from pathlib import Path
 ERA5_RAW_DIR       = Path("/nird/datapeak/NS9873K/etdu/raw/era5/continuous-format/daily/europe/tp24/")
 CATCHMENT_RAW_DIR  = Path("/nird/datalake/NS9873K/etdu/raw/nve/")
 SENORGE_RAW_DIR    = Path("/nird/datapeak/NS9873K/DATA/senorge/rr/")   # reserved for future use
-ERA5_INTERPOLATED_DIR = Path("/nird/datalake/NS9873K/etdu/raw/era5/scandinavia/tp")
+ERA5_INTERPOLATED_BASE = Path("/nird/datalake/NS9873K/etdu/raw/era5/scandinavia")
+ERA5_INTERPOLATED_DIR  = ERA5_INTERPOLATED_BASE / "tp"   # kept for backward-compat; prefer ERA5_INTERPOLATED_BASE / "tp" in new code
+ERA5_INTERPOLATED_SWE_DIR = ERA5_INTERPOLATED_BASE / "sd"
+ERA5_INTERPOLATED_SWVL_DIR = ERA5_INTERPOLATED_BASE / "swvl"   # ERA5 interpolated soil moisture
 GEOJSON_DIR        = CATCHMENT_RAW_DIR     # adjust if GeoJSONs live elsewhere
 
 FIGURES_DIR           = Path("/nird/datalake/NS9873K/lbal/figures/")
@@ -21,9 +24,13 @@ OVERALL_PRECIP_EXTENT: tuple = (3.0, 16.0, 56.5, 66.0)  # (west, east, south, no
 
 # ────────────── Define Climatology Models ─────────────────────
 # ── SMILE model raw data paths ────────────────────────────────
-_SMILE_BASE       = Path("/nird/datalake/NS9873K/etdu/raw/smile")
-CESM2_LE_DIR      = _SMILE_BASE / "cesm2_le"            / "scandinavia" / "tp24"
-GFDL_SPEAR_DIR    = _SMILE_BASE / "gfdl_spear_med_le"   / "scandinavia" / "tp24"
+_SMILE_BASE         = Path("/nird/datalake/NS9873K/etdu/raw/smile")
+CESM2_LE_BASE       = _SMILE_BASE / "cesm2_le"           / "scandinavia"
+CESM2_LE_DIR        = CESM2_LE_BASE / "PRECT"            # CESM2-LE daily precipitation (variable PRECT, mm/day; identical values to the retired tp24 folder)
+CESM2_LE_SWE_DIR    = CESM2_LE_BASE / "SWE"
+CESM2_LE_SM_DIR     = CESM2_LE_BASE / "SM"
+GFDL_SPEAR_DIR      = _SMILE_BASE / "gfdl_spear_med_le"  / "scandinavia" / "tp24"
+
 
 # ── SMILE analysis defaults ────────────────────────────────────────────────────
 # default_start / default_end : 40-year present-climate window centred near 2023.
@@ -245,30 +252,65 @@ def twodaymedian_precip_paths(fig_subdir: str, start_year: int, end_year: int) -
         fig_subdir, f"2daymedian_precip_{start_year}-{end_year}.pdf"
     )
 
-def twodaymedian_3panel_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+def twodaymedian_precip_diff_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
     """Paths for the 3-panel 2-day median vs ERA5-interpolated + difference figure."""
     return precip_map_figure_paths(
-        fig_subdir, f"2daymedian_3panel_interpera5_{start_year}-{end_year}.pdf"
+        fig_subdir, f"2daymedian_precip_diff_{start_year}-{end_year}.pdf"
     )
 
-def twodaymedian_diff_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+def twodaymedian_precip_diffonly_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
     """Paths for the single-panel 2-day median difference figure."""
     return precip_map_figure_paths(
-        fig_subdir, f"2daymedian_diff_interpera5_{start_year}-{end_year}.pdf"
+        fig_subdir, f"2daymedian_precip_diffonly_{start_year}-{end_year}.pdf"
     )
 
-def twodayp90_3panel_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
-    """Paths for the 3-panel 2-day 90th-percentile figure."""
+def twodaymedian_90pctl_diff_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the 3-panel 90th-percentile 2-day median difference figure."""
     return precip_map_figure_paths(
-        fig_subdir, f"2dayp90_3panel_interpera5_{start_year}-{end_year}.pdf"
+        fig_subdir, f"2daymedian_90pctl_precip_diff_{start_year}-{end_year}.pdf"
     )
 
-def twodayp90_diff_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
-    """Paths for the single-panel 2-day 90th-percentile difference figure."""
+def twodaymedian_90pctl_diffonly_paths(fig_subdir: str, start_year: int, end_year: int) -> list:
+    """Paths for the single-panel 90th-percentile 2-day median difference figure."""
     return precip_map_figure_paths(
-        fig_subdir, f"2dayp90_diff_interpera5_{start_year}-{end_year}.pdf"
+        fig_subdir, f"2daymedian_90pctl_precip_diffonly_{start_year}-{end_year}.pdf"
     )
 
+def twodaymedian_precip_sig_diff_paths(
+    fig_subdir: str, start_year: int, end_year: int, pctl_tag: str
+) -> list:
+    """Paths for significance-hatched 3-panel 2-day median diff figure.
+    pctl_tag: e.g. '5_95pctl' or '2_98pctl'
+    """
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_precip_{pctl_tag}_diff_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_90pctl_precip_sig_diff_paths(
+    fig_subdir: str, start_year: int, end_year: int, pctl_tag: str
+) -> list:
+    """Paths for significance-hatched 3-panel 90th-pctile diff figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_90pctl_precip_{pctl_tag}_diff_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_precip_sig_diffonly_paths(
+    fig_subdir: str, start_year: int, end_year: int, pctl_tag: str
+) -> list:
+    """Paths for significance-hatched single-panel 2-day median diffonly figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_precip_{pctl_tag}_diffonly_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_90pctl_precip_sig_diffonly_paths(
+    fig_subdir: str, start_year: int, end_year: int, pctl_tag: str
+) -> list:
+    """Paths for significance-hatched single-panel 90th-pctile diffonly figure."""
+    return precip_map_figure_paths(
+        fig_subdir, f"2daymedian_90pctl_precip_{pctl_tag}_diffonly_{start_year}-{end_year}.pdf"
+    )
+
+# Cesm2-le and Era5 Interpolated Paths
 def cesm2_annmedian_cache_path(start_year: int, end_year: int) -> Path:
     """Cache path for the CESM2-LE 100-member median of the annual-total spatial field."""
     return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
@@ -283,3 +325,165 @@ def cesm2_2day_p90_cache_path(start_year: int, end_year: int) -> Path:
     """Cache path for the CESM2-LE 100-member median 2-day 90th-percentile spatial field."""
     return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
             f"p90_2day_median_cesm2le_{start_year}-{end_year}.nc")
+
+def cesm2_2day_global_median_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for the CESM2-LE true global median of 2-day rolling sums (all members×time)."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_global_median_cesm2le_{start_year}-{end_year}.nc")
+
+def cesm2_2day_per_member_medians_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for stacked per-member 2-day medians [n_members, lat, lon]."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_per_member_medians_cesm2le_{start_year}-{end_year}.nc")
+
+def cesm2_2day_per_member_p90_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for stacked per-member 2-day 90th-percentile fields [n_members, lat, lon]."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_per_member_p90_cesm2le_{start_year}-{end_year}.nc")
+
+# ── Seasonal analysis constants ────────────────────────────────────────────────
+SEASONS_ORDER: list[str] = ["DJF", "MAM", "JJA", "SON"]
+SEASON_LABELS: dict[str, str] = {
+    "DJF": "Winter (DJF)",
+    "MAM": "Spring (MAM)",
+    "JJA": "Summer (JJA)",
+    "SON": "Autumn (SON)",
+}
+SEASON_MONTHS: dict[str, list[int]] = {
+    "DJF": [12, 1, 2],
+    "MAM": [3, 4, 5],
+    "JJA": [6, 7, 8],
+    "SON": [9, 10, 11],
+}
+
+# ── Seasonal analysis cache paths ─────────────────────────────────────────────
+
+def era5_interp_2day_seasonal_median_cache_path(
+    season: str, start_year: int, end_year: int
+) -> Path:
+    """Cache for ERA5-interpolated seasonal 2-day median [lat, lon]."""
+    return (POSTPROC_DIR / "era5_interpolated" / "overall_precipitation" /
+            f"2day_seasonal_{season}_median_era5interp_{start_year}-{end_year}.nc")
+
+def era5_interp_2day_seasonal_p90_cache_path(
+    season: str, start_year: int, end_year: int
+) -> Path:
+    """Cache for ERA5-interpolated seasonal 2-day 90th-percentile [lat, lon]."""
+    return (POSTPROC_DIR / "era5_interpolated" / "overall_precipitation" /
+            f"2day_seasonal_{season}_p90_era5interp_{start_year}-{end_year}.nc")
+
+def cesm2_2day_seasonal_global_median_cache_path(
+    season: str, start_year: int, end_year: int
+) -> Path:
+    """Cache for CESM2-LE true seasonal global median [lat, lon]."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_seasonal_{season}_global_median_{start_year}-{end_year}.nc")
+
+def cesm2_2day_seasonal_per_member_medians_cache_path(
+    season: str, start_year: int, end_year: int
+) -> Path:
+    """Cache for CESM2-LE per-member seasonal 2-day median [n_members, lat, lon]."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_seasonal_{season}_per_member_medians_{start_year}-{end_year}.nc")
+
+def cesm2_2day_seasonal_global_p90_cache_path(
+    season: str, start_year: int, end_year: int
+) -> Path:
+    """Cache for CESM2-LE true seasonal global 90th-percentile [lat, lon]."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_seasonal_{season}_global_p90_{start_year}-{end_year}.nc")
+
+def cesm2_2day_seasonal_per_member_p90_cache_path(
+    season: str, start_year: int, end_year: int
+) -> Path:
+    """Cache for CESM2-LE per-member seasonal 2-day 90th-pctile [n_members, lat, lon]."""
+    return (POSTPROC_DIR / "cesm2_le" / "overall_precipitation" /
+            f"cesm2_2day_seasonal_{season}_per_member_p90_{start_year}-{end_year}.nc")
+
+# ── Seasonal significance figure paths ────────────────────────────────────────
+
+def twodaymedian_seasonal_precip_sig_diff_paths(
+    fig_subdir: str, start_year: int, end_year: int, pctl_tag: str
+) -> list:
+    """Paths for 4×3 seasonal significance-hatched 2-day median diff figure."""
+    return precip_map_figure_paths(
+        fig_subdir,
+        f"2daymedian_seasonal_precip_{pctl_tag}_diff_{start_year}-{end_year}.pdf"
+    )
+
+def twodaymedian_seasonal_90pctl_precip_sig_diff_paths(
+    fig_subdir: str, start_year: int, end_year: int, pctl_tag: str
+) -> list:
+    """Paths for 4×3 seasonal significance-hatched 90th-pctile diff figure."""
+    return precip_map_figure_paths(
+        fig_subdir,
+        f"2daymedian_seasonal_90pctl_precip_{pctl_tag}_diff_{start_year}-{end_year}.pdf"
+    )
+
+def era5_interp_2day_median_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for the ERA5-interpolated 2-day median spatial field."""
+    return (POSTPROC_DIR / "era5_interpolated" / "overall_precipitation" /
+            f"2day_median_era5interp_{start_year}-{end_year}.nc")
+
+def era5_interp_2day_p90_cache_path(start_year: int, end_year: int) -> Path:
+    """Cache path for the ERA5-interpolated 2-day 90th-percentile spatial field."""
+    return (POSTPROC_DIR / "era5_interpolated" / "overall_precipitation" /
+            f"2day_p90_era5interp_{start_year}-{end_year}.nc")
+
+# ── SWE / soil-moisture cache paths (compound flood-risk analysis) ────────────
+# Mirrors the precip cache layout, but parameterised by `kind` so two functions
+# cover both variables and every cache type (instead of one function each).
+#   model ∈ {"cesm2_le", "era5_interpolated"}
+#   kind  ∈ {"swe", "soil_moisture"}   — postprocessed sub-folder
+
+def field_daily_cache_path(model: str, kind: str, start_year: int, end_year: int,
+                           member_id: str | None = None) -> Path:
+    """Per-member (CESM2-LE) or overall (ERA5-interp) DAILY field cache path —
+    counterpart of overall_precip_member_path / overall_precip_path for SWE & SM."""
+    if member_id is not None:
+        fname = f"post_processed_{model}_{kind}_1day_member{member_id}_{start_year}-{end_year}.nc"
+    else:
+        fname = f"post_processed_{model}_{kind}_1day_{start_year}-{end_year}.nc"
+    return POSTPROC_DIR / model / kind / fname
+
+def field_2day_cache_path(model: str, kind: str, which: str,
+                          start_year: int, end_year: int, season: str = "") -> Path:
+    """Derived 2-day cache path (global/per-member median or p90; optional season).
+    which (cesm2_le): global_median | per_member_medians | global_p90 | per_member_p90
+    which (era5_interpolated): median | p90
+    season: "" → annual, else one of DJF/MAM/JJA/SON."""
+    seas = f"seasonal_{season}_" if season else ""
+    if model == "cesm2_le":
+        fname = f"cesm2_2day_{seas}{which}_{kind}_{start_year}-{end_year}.nc"
+    else:
+        fname = f"2day_{seas}{which}_era5interp_{kind}_{start_year}-{end_year}.nc"
+    return POSTPROC_DIR / model / kind / fname
+
+
+# ── GeoJSON filenames (canonical definition — imported by notebooks) ───────────
+GEOJSON_FILES: dict[str, str] = {
+    "nevina_bergheim":  "catchment_nve_nevina_bergheim.geojson",
+    "nevina_honnefoss": "catchment_nve_nevina_hønnefoss.geojson",
+    "nevina_losna":     "catchment_nve_nevina_losna.geojson",
+    "regine_drammen":   "catchment_nve_regine_drammen.geojson",
+    "regine_glomma":    "catchment_nve_regine_glomma.geojson",
+}
+
+# ── Model display settings (moved here from plot_style.py to break circular import) ──
+MODEL_COLORS: dict[str, str] = {
+    "senorge":           "#D73027",
+    "era5_0.25":         "#F28E2B",
+    "era5_0.5":          "#E3B505",
+    "gfdl_spear_med_le": "#4DAF4A",
+    "cesm2_le":          "#2C7BB6",
+}
+MODEL_LABELS: dict[str, str] = {
+    "senorge":           "SeNorge / 1 km",
+    "era5_0.25":         "ERA5 / 0.25°",
+    "era5_0.5":          "ERA5 / 0.5°",
+    "gfdl_spear_med_le": "GFDL-SPEAR / 0.5° x 0.625°",
+    "cesm2_le":          "CESM2-LE / 0.94° x 1.25°",
+}
+MODEL_ORDER: list[str] = [
+    "senorge", "era5_0.25", "era5_0.5", "gfdl_spear_med_le", "cesm2_le"
+]

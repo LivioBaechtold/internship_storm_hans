@@ -7,3 +7,9 @@ venvs/
 .DS_Store
 Thumbs.db
 
+
+# Large generated PDFs kept locally only
+figures/precip_maps_hans/2daymedian_seasonal_precip_5_95pctl_diff_1995-2024.pdf
+figures/precip_maps_hans/2daymedian_seasonal_90pctl_precip_2_98pctl_diff_1995-2024.pdf
+figures/precip_maps_hans/2daymedian_seasonal_90pctl_precip_5_95pctl_diff_1995-2024.pdf
+figures/precip_maps_hans/2daymedian_seasonal_precip_2_98pctl_diff_1995-2024.pdf

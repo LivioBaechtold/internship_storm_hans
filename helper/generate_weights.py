@@ -323,7 +323,7 @@ def run_cesm2_le() -> None:
     print("─" * 60)
     print(f"Reading grid from: {CESM2_LE_DIR}")
 
-    ref_file = _find_one_smile_file(CESM2_LE_DIR, r"^cesm2-le\.tp24\.\d{3}\.\d{8}-\d{8}\.nc$",)
+    ref_file = _find_one_smile_file(CESM2_LE_DIR, r"^cesm2-le\.[A-Za-z0-9_]+\.\d{3}\.\d{8}-\d{8}\.nc$",)
     print(f"  Reference file : {ref_file.name}")
 
     ds_ref   = xr.open_dataset(str(ref_file))
