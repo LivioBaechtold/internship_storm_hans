@@ -45,7 +45,7 @@ import xarray as xr
 import geopandas as gpd
 from pathlib import Path
 from shapely.geometry import box
-from shapely.ops import transform as shapely_transform
+from shapely.ops import transform as shapely_transform, unary_union
 from shapely.prepared import prep
 from pyproj import Transformer
 
@@ -65,6 +65,10 @@ GEOJSON_FILES = {
     "nevina_losna":     "catchment_nve_nevina_losna.geojson",
     "regine_drammen":   "catchment_nve_regine_drammen.geojson",
     "regine_glomma":    "catchment_nve_regine_glomma.geojson",}
+# ── Combined catchments drammen + glomma
+COMBINED_CATCHMENTS: dict[str, list[str]] = {
+    "regine_drammen_glomma": ["regine_drammen", "regine_glomma"],}
+
 
 GFDL_SPEAR_DIR = cfg.GFDL_SPEAR_DIR
 CESM2_LE_DIR   = cfg.CESM2_LE_DIR
@@ -89,6 +93,22 @@ def _dissolve_geojson(geojson_path: Path):
         return gdf.geometry.union_all()         # geopandas >= 0.14
     except AttributeError:
         return gdf.geometry.unary_union         # geopandas < 0.14
+    
+
+#Define how to dissolve one OR several GeoJSON files into a single union polygon
+def _dissolve_geojson_union(geojson_paths) -> "object":
+    """
+    Dissolve one GeoJSON file (Path) or several (list of Paths) into a single
+    Shapely geometry in EPSG:4326. Several files are merged with unary_union,
+    so overlapping catchment areas count only ONCE.
+    """
+    if isinstance(geojson_paths, (str, Path)):
+        geojson_paths = [geojson_paths]
+    geoms = [_dissolve_geojson(Path(p)) for p in geojson_paths]
+    union = geoms[0] if len(geoms) == 1 else unary_union(geoms)
+    if not union.is_valid:
+        union = union.buffer(0)   # repair rare self-intersections after merging
+    return union
 
 
 #Define how to build a transformer function for reprojection
@@ -101,12 +121,16 @@ def _build_projector(dst_epsg: str = "EPSG:25833"):
 
 
 #Define how to compute area-fraction weights for one catchment on a lat/lon grid
-def build_weights(geojson_path: Path,
+def build_weights(geojson_path: Path | list[Path],
                   lat_grid: np.ndarray,
                   lon_grid: np.ndarray,
                   dst_epsg: str = "EPSG:25833") -> np.ndarray:
     """
     Compute area-fraction catchment weights on any regular lat/lon grid
+
+    geojson_path may be a single GeoJSON file or a list of files; a list is
+    dissolved into ONE union polygon first (combined catchments), so cells in
+    the overlap region are never counted twice.
 
     Parameters
     ----------
@@ -115,8 +139,9 @@ def build_weights(geojson_path: Path,
     np.ndarray, shape (n_lat, n_lon), dtype float32
         Values in [0, 1].  0 = no overlap; 1 = cell fully inside catchment
     """
-    # Step 1 — dissolve catchment to one polygon in lon/lat
-    poly_ll = _dissolve_geojson(geojson_path)
+    # Step 1 — dissolve catchment(s) to one polygon in lon/lat
+    poly_ll = _dissolve_geojson_union(geojson_path)
+
 
     # Step 2 — reproject catchment to metric CRS once (area computation)
     proj_fn  = _build_projector(dst_epsg)
@@ -204,22 +229,30 @@ def _run_weight_loop(dataset: str,
     print(f"  Grid: {len(lat_grid)} lats × {len(lon_grid)} lons")
     print()
 
-    for slug, geojson_name in GEOJSON_FILES.items():
+    # Single catchments + combined (union) catchments in one loop:
+    # each entry maps slug → list of GeoJSON filenames (singles have one entry).
+    entries: dict[str, list[str]] = {slug: [name] for slug, name in GEOJSON_FILES.items()}
+    for combo_slug, part_slugs in COMBINED_CATCHMENTS.items():
+        entries[combo_slug] = [GEOJSON_FILES[p] for p in part_slugs]
+
+    for slug, geojson_names in entries.items():
         out_path = out_dir / f"weights_catchment_{slug}_{dataset}{res_part}.nc"
 
         if out_path.exists():
             print(f"[skip] Already exists: {out_path.name}")
             continue
 
-        geojson_path = cfg.GEOJSON_DIR / geojson_name
-        if not geojson_path.exists():
+        geojson_paths = [cfg.GEOJSON_DIR / name for name in geojson_names]
+        missing = [p for p in geojson_paths if not p.exists()]
+        if missing:
             print(f"[WARNING] GeoJSON not found for '{slug}':")
-            print(f"  Expected : {geojson_path}")
+            for p in missing:
+                print(f"  Expected : {p}")
             print(f"  Check    : ls {cfg.GEOJSON_DIR}")
             continue
 
         print(f"Processing {slug} ...")
-        weights = build_weights(geojson_path, lat_grid, lon_grid)
+        weights = build_weights(geojson_paths, lat_grid, lon_grid)
         nonzero = int((weights > 0).sum())
         print(f"  Non-zero cells: {nonzero}")
         if nonzero == 0:
@@ -229,6 +262,7 @@ def _run_weight_loop(dataset: str,
         save_weight_nc(weights, lat_grid, lon_grid, out_path,
                        lat_dim=lat_dim, lon_dim=lon_dim)
         print()
+
 
     print(f"Done. Weight files written to:  {out_dir}")
 

@@ -160,8 +160,14 @@ def save_senorge_overall(
         compat="override", mask_and_scale=False,
         chunks={"time": 31, "Y": 256, "X": 256})
     try:
-        da = ds["rr"].sel(
-            X=slice(xmin, xmax), Y=slice(ymin, ymax)).astype("float32")
+        # seNorge Y (northing) is stored DESCENDING and X (easting) ASCENDING.
+        # Order each slice to match its coordinate direction, else .sel returns
+        # an empty range (Y=0) and the cache is silently built empty.
+        yv = ds["Y"].values
+        xv = ds["X"].values
+        y_slice = slice(ymin, ymax) if (yv.size < 2 or yv[0] <= yv[-1]) else slice(ymax, ymin)
+        x_slice = slice(xmin, xmax) if (xv.size < 2 or xv[0] <= xv[-1]) else slice(xmax, xmin)
+        da = ds["rr"].sel(X=x_slice, Y=y_slice).astype("float32")
         da = da.where(da != np.float32(-999.99)).sortby("time")
         save_spatial_netcdf(da, out_path, "rr_mm",
                             time_chunk=31, y_chunk=256, x_chunk=256)

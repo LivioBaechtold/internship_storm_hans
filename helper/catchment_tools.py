@@ -523,6 +523,25 @@ def rolling_melt(
     return out
 
 
+def rolling_identity(
+    da: xr.DataArray,
+    window_days: int = 2,
+    var_name: str = None,
+) -> xr.DataArray:
+    """
+    Pass-through 'rolling' op for fields whose window quantity is ALREADY computed
+    and stored on disk (e.g. the daily signed-snowmelt ΔSWE cache built in
+    load_data_store_postprocessed.ipynb). Returns `da` unchanged so the generic
+    window-median / window-p90 compute functions can operate directly on the
+    stored difference. `window_days` is accepted for signature compatibility and
+    ignored.
+    """
+    out = da
+    if var_name is not None:
+        out = out.rename(var_name)
+    return out
+
+
 def rolling_mean(
     da: xr.DataArray,
     window_days: int = 2,
@@ -548,6 +567,219 @@ def rolling_mean(
     elif da.name is not None:
         out.name = da.name
     return out
+
+
+# ── CESM2-LE catchment-averaged compound series (precip / SM / snowmelt) ──────
+# One cache per (window, catchment, variable) with ALL common members as a
+# [member, time] array — consumed by the joint-distribution cell in
+# compound_flood_risk_analysis.ipynb.
+
+def common_cesm2_le_members() -> list[str]:
+    """
+    Member IDs present in ALL three CESM2-LE variable directories (PRECT∩SM∩SWE).
+
+    PRECT has 100 members; SM and SWE exist for only 90 (odd members 001–019
+    missing), so the common set is those 90 members.
+    """
+    from data_smile import find_smile_members
+    common = (set(find_smile_members(cfg.CESM2_LE_DIR, "cesm2_le"))
+              & set(find_smile_members(cfg.CESM2_LE_SM_DIR, "cesm2_le"))
+              & set(find_smile_members(cfg.CESM2_LE_SWE_DIR, "cesm2_le")))
+    return sorted(common)
+
+
+# Per-variable I/O configuration for the compound series (spatial member cache
+# path builder, variable name inside that cache, output units, raw dir for the
+# available-year lookup).
+_CESM2_COMPOUND_SPECS: dict[str, dict] = {
+    "precipitation": dict(
+        raw_dir_key="CESM2_LE_DIR", cache_var="tp24_mm", units="mm",
+        path_fn=lambda mid, s, e: cfg.overall_precip_member_path("cesm2_le", mid, s, e)),
+    "soil_moisture": dict(
+        raw_dir_key="CESM2_LE_SM_DIR", cache_var="soil_moisture", units="kg/m2",
+        path_fn=lambda mid, s, e: cfg.field_daily_cache_path(
+            "cesm2_le", "soil_moisture", s, e, member_id=mid)),
+    "snowmelt": dict(
+        raw_dir_key="CESM2_LE_SWE_DIR", cache_var="swe", units="kg/m2",
+        path_fn=lambda mid, s, e: cfg.field_daily_cache_path(
+            "cesm2_le", "swe", s, e, member_id=mid)),
+}
+
+
+def _cesm2_compound_window_op(variable: str, da_daily: xr.DataArray,
+                              window_days: int) -> xr.DataArray:
+    """Window op on a daily catchment series — same ops as the map pipeline:
+    precipitation → rolling SUM, soil_moisture → rolling MEAN,
+    snowmelt → max(0, −ΔSWE) over the window (rolling_melt; positive melt).
+    Swap rolling_melt → rolling_change below for the raw signed ΔSWE instead."""
+    if variable == "precipitation":
+        return da_daily if window_days == 1 else rolling_accumulation(da_daily, window_days)
+    if variable == "soil_moisture":
+        return da_daily if window_days == 1 else rolling_mean(da_daily, window_days)
+    if variable == "snowmelt":
+        if window_days < 2:
+            raise ValueError(
+                "snowmelt requires window_days >= 2 (ΔSWE = SWE(t) − SWE(t−(N−1))).")
+        return rolling_melt(da_daily, window_days)
+    raise ValueError(f"Unknown variable {variable!r}; "
+                     f"expected one of {sorted(_CESM2_COMPOUND_SPECS)}")
+
+
+def save_cesm2_le_catchment_field_series(
+    variable: str,
+    window_days: int,
+    catchment_slug: str,
+    force: bool = False,
+) -> Path:
+    """
+    Build/save the catchment-averaged CESM2-LE compound series for one
+    (variable, window, catchment) over the FULL available record (1920–2034).
+
+    Output: ONE NetCDF [member, time] at cfg.cesm2_catchment_field_path(...),
+    containing every member available for ALL three variables (90 members).
+
+    Methodology per member (identical to the existing catchment pipeline):
+      spatial daily cache → align + crop weights → weighted catchment mean →
+      window op (_cesm2_compound_window_op). NOTE: the catchment mean is taken
+      FIRST and the window op applied to the 1-D series — same order as
+      run_all_smile; for the nonlinear melt clip this differs slightly from the
+      per-pixel spatial-map pipeline.
+    """
+    from data_smile import get_year_range_smile
+    spec = _CESM2_COMPOUND_SPECS[variable]
+    avail_s, avail_e = get_year_range_smile(getattr(cfg, spec["raw_dir_key"]), "cesm2_le")
+    out_path = cfg.cesm2_catchment_field_path(
+        window_days, catchment_slug, variable, avail_s, avail_e)
+
+    if (not force) and out_path.exists():
+        print(f"  [skip] exists: {out_path.name}")
+        return out_path
+
+    members = common_cesm2_le_members()
+    weights = load_weights(find_weight_file("cesm2_le", "", catchment_slug))
+    print(f"  [build] {variable} | {window_days}-day | {catchment_slug} | "
+          f"{len(members)} members | {avail_s}–{avail_e}")
+
+    member_series: list[xr.DataArray] = []
+    for i, mid in enumerate(members, start=1):
+        cache = spec["path_fn"](mid, avail_s, avail_e)
+        if not cache.exists():
+            raise FileNotFoundError(
+                f"Spatial member cache missing: {cache}\n"
+                "Build the daily spatial caches first in "
+                "load_data_store_postprocessed.ipynb (cells "
+                "'# %% [Overall precipitation caches …]' and "
+                "'# %% [SWE & soil-moisture daily caches …]').")
+        da = open_field_cache(cache, spec["cache_var"], avail_s, avail_e)
+        w_aligned = align_weights_to_precip(da, weights)
+        da_roi, w_roi = crop_to_weight_bbox(da, w_aligned)
+        da_daily = compute_catchment_mean(da_roi.where(w_roi > 0), w_roi).load()
+        member_series.append(
+            _cesm2_compound_window_op(variable, da_daily, window_days).astype("float32"))
+        if i % 10 == 0:
+            print(f"    {i}/{len(members)} members processed ...")
+
+    # Fixed-width member IDs: netCDF4 cannot serialise the variable-width
+    # StringDType that pd.Index produces under numpy 2.
+    da_all = xr.concat(member_series, dim="member")
+    da_all = da_all.assign_coords(member=np.array(members, dtype="U3"))
+
+    da_all.name = variable
+    da_all.attrs.update({
+        "units": spec["units"], "window_days": window_days,
+        "catchment_slug": catchment_slug,
+        "long_name": f"{window_days}-day catchment-averaged {variable} (CESM2-LE)"})
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    da_all.to_dataset(name=variable).to_netcdf(
+        str(out_path), encoding={variable: {"zlib": True, "complevel": 4}})
+    print(f"  [saved] {out_path.name}")
+    return out_path
+
+
+def parse_member_selection(selection, available: list[str]) -> list[str]:
+    """
+    Normalise a member selection against the available member IDs.
+
+    selection : "all" | range string "1-30" | comma string "3,4,27"
+                | list of ints/strings, e.g. [3, 4, 5, 27, 35] or ["003", "027"]
+    Raises ValueError listing every requested-but-unavailable member.
+    """
+    if isinstance(selection, str):
+        s = selection.strip().lower()
+        if s == "all":
+            return list(available)
+        if "-" in s:
+            lo, hi = (int(p) for p in s.split("-", 1))
+            requested = [f"{i:03d}" for i in range(lo, hi + 1)]
+        else:
+            requested = [f"{int(p):03d}" for p in s.split(",")]
+    else:
+        requested = [f"{int(m):03d}" for m in selection]
+
+    missing = sorted(set(requested) - set(available))
+    if missing:
+        raise ValueError(
+            f"Requested member(s) not available: {', '.join(missing)}.\n"
+            f"Available ({len(available)}): {', '.join(available)}\n"
+            "CESM2-LE SM & SWE exist for only 90 members (odd members 001–019 "
+            "have no data), so the compound series contain exactly those 90 "
+            "members for every variable, precipitation included.\n"
+            "→ Adjust JD_MEMBERS in the joint-distribution cell of "
+            "compound_flood_risk_analysis.ipynb.")
+    return requested
+
+
+def load_cesm2_le_catchment_field_series(
+    variable: str,
+    window_days: int,
+    catchment_slug: str,
+    start_year: int | None = None,
+    end_year: int | None = None,
+    members="all",
+) -> xr.DataArray:
+    """
+    Load one compound-series cache [member, time] and subset by years + members.
+
+    Every unavailable selection raises an informative error stating WHERE to
+    build/fix it (notebook + cell) — the notification mechanism used by the
+    joint-distribution cell.
+    """
+    cache_dir = cfg.POSTPROC_DIR / "cesm2_le" / "catchment_averaged"
+    pattern = (f"post_processed_cesm2_le_{cfg.acc_tag(window_days)}_"
+               f"{catchment_slug}_{variable}_*.nc")
+    hits = sorted(cache_dir.glob(pattern))
+    if not hits:
+        raise FileNotFoundError(
+            f"No postprocessed series for variable='{variable}', "
+            f"window_days={window_days}, catchment='{catchment_slug}'.\n"
+            f"Expected a file matching:\n  {cache_dir / pattern}\n"
+            "→ First calculate and save it inside load_data_store_postprocessed.ipynb, "
+            "cell \"# %% [CESM2-LE catchment compound series — run once per window "
+            f"selection]\" (set WINDOW_DAYS_COMPOUND = {window_days} there and re-run).")
+
+    nc_path = hits[-1]
+    m = re.search(r"_(\d{4})-(\d{4})\.nc$", nc_path.name)
+    file_s, file_e = int(m.group(1)), int(m.group(2))
+
+    use_s = file_s if start_year is None else int(start_year)
+    use_e = file_e if end_year   is None else int(end_year)
+    if use_s > use_e or use_s < file_s or use_e > file_e:
+        raise ValueError(
+            f"Requested time range {use_s}–{use_e} is not covered by the stored "
+            f"series {file_s}–{file_e} ({nc_path.name}).\n"
+            "→ Adjust JD_START / JD_END in the joint-distribution cell of "
+            "compound_flood_risk_analysis.ipynb (or rebuild the series in "
+            "load_data_store_postprocessed.ipynb if the stored record is outdated).")
+
+    ds = xr.open_dataset(
+        str(nc_path),
+        decode_times=xr.coders.CFDatetimeCoder(use_cftime=True))
+    da = ds[variable]
+    avail_members = [v.decode() if isinstance(v, bytes) else str(v)
+                     for v in da["member"].values]
+    da = da.assign_coords(member=avail_members)
+    da = da.sel(member=parse_member_selection(members, avail_members))
+    return subset_time_series_by_year(da, use_s, use_e)
 
 
 # Define Check Reasonableness for Series

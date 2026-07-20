@@ -229,7 +229,7 @@ def compute_era5_annual_median_2d(
     return out.compute()
 
 
-def compute_era5_2day_median_2d(
+def compute_era5_window_median_2d(
     resolution: str,
     start_year: int,
     end_year: int,
@@ -399,8 +399,43 @@ def save_era5_interpolated_field_overall(
     finally:
         ds.close()
 
+def save_era5_interpolated_field_diff_overall(
+    era5_interp_dir: Path,
+    in_path_fn,             # callable(start_year, end_year) -> Path (1-day cache)
+    out_path_fn,            # callable(start_year, end_year) -> Path (N-day ΔSWE cache)
+    cache_var: str,         # variable name stored in the cache, e.g. 'swe'
+    diff_fn,                # callable(da, window_days) -> xr.DataArray, e.g. rolling_melt
+    open_cache_fn,          # callable(path, start_year, end_year) -> xr.DataArray
+    window_days: int,
+    units: str = "kg/m2",
+    force: bool = False,
+) -> None:
+    """
+    Build/save the ERA5-interpolated daily N-day snowmelt cache from the raw 1-day
+    field cache (max(0, −ΔSWE): SWE decrease → positive snowmelt, SWE gain → 0) over
+    the full available record. Counterpart of save_cesm2_le_field_diff_overall.
+    """
+    
+    from catchment_tools import save_spatial_netcdf
+    files = find_era5_interpolated_files(era5_interp_dir)
+    start_year, end_year = get_year_range_era5_interp(files)
+    out_path = out_path_fn(start_year, end_year)
+    if (not force) and out_path.exists():
+        print(f"  [skip] ERA5-interp {window_days}-day ΔSWE cache exists: {out_path.name}")
+        return
+    in_path = in_path_fn(start_year, end_year)
+    if not in_path.exists():
+        raise FileNotFoundError(
+            f"Raw 1-day cache missing: {in_path}\n"
+            "    Build the 1-day SWE cache first (SWE & soil-moisture daily-cache cell).")
+    print(f"  Building ERA5-interpolated {window_days}-day ΔSWE cache "
+          f"({start_year}–{end_year}) ...")
+    da = open_cache_fn(in_path, start_year, end_year)
+    da_diff = diff_fn(da, window_days=window_days)
+    save_spatial_netcdf(da_diff.astype("float32"), out_path, cache_var,
+                        time_chunk=365, y_chunk=64, x_chunk=64, units=units)
 
-def compute_era5_interpolated_2day_median_2d(
+def compute_era5_interpolated_window_median_2d(
     start_year: int,
     end_year: int,
     era5_interp_dir: Path,
@@ -423,7 +458,7 @@ def compute_era5_interpolated_2day_median_2d(
     return subset_fn(da_2day, start_year, end_year).median(dim="time").compute()
 
 
-def compute_era5_interpolated_2day_p90_2d(
+def compute_era5_interpolated_window_p90_2d(
     start_year: int,
     end_year: int,
     era5_interp_dir: Path,
@@ -478,7 +513,7 @@ def _filter_season_da(da: "xr.DataArray", season: str) -> "xr.DataArray":
     return da.isel(time=da["time"].dt.month.isin(months))
 
 
-def compute_era5_interpolated_2day_seasonal_median_2d(
+def compute_era5_interpolated_window_seasonal_median_2d(
     season: str,
     start_year: int,
     end_year: int,
@@ -528,7 +563,7 @@ def compute_era5_interpolated_2day_seasonal_median_2d(
     return out
 
 
-def compute_era5_interpolated_2day_seasonal_p90_2d(
+def compute_era5_interpolated_window_seasonal_p90_2d(
     season: str,
     start_year: int,
     end_year: int,

@@ -373,6 +373,43 @@ def save_cesm2_le_field_overall(
         save_spatial_netcdf(da.astype("float32"), out_path, cache_var,
                             time_chunk=365, y_chunk=64, x_chunk=64, units=units)
 
+def save_cesm2_le_field_diff_overall(
+    model_dir: Path,
+    in_path_fn,             # callable(member_id, avail_start, avail_end) -> Path (1-day cache)
+    out_path_fn,            # callable(member_id, avail_start, avail_end) -> Path (N-day ΔSWE cache)
+    cache_var: str,         # variable name stored in the cache, e.g. 'swe'
+    diff_fn,                # callable(da, window_days) -> xr.DataArray, e.g. rolling_melt
+    open_cache_fn,          # callable(path, start_year, end_year) -> xr.DataArray
+    window_days: int,
+    units: str = "kg/m2",
+    force: bool = False,
+) -> None:
+    """
+    Build/save per-member daily CESM2-LE N-day snowmelt caches from the raw 1-day
+    field caches. For each member it opens the 1-day cache, applies
+    ``diff_fn(da, window_days)`` (max(0, −ΔSWE): SWE decrease → positive snowmelt,
+    SWE gain → 0) over the FULL available record, and writes it to the N-day cache path.
+    """
+    from catchment_tools import save_spatial_netcdf
+    members = find_smile_members(model_dir, "cesm2_le")
+    avail_start, avail_end = get_year_range_smile(model_dir, "cesm2_le")
+    print(f"  cesm2_le/{cache_var}: {len(members)} members, "
+          f"{window_days}-day ΔSWE, {avail_start}–{avail_end} ...")
+    for i, mid in enumerate(members, start=1):
+        out_path = out_path_fn(mid, avail_start, avail_end)
+        if (not force) and out_path.exists():
+            print(f"    [skip] member {mid} ({i}/{len(members)})")
+            continue
+        in_path = in_path_fn(mid, avail_start, avail_end)
+        if not in_path.exists():
+            raise FileNotFoundError(
+                f"Raw 1-day cache missing: {in_path}\n"
+                "    Build the 1-day SWE caches first (SWE & soil-moisture daily-cache cell).")
+        print(f"    [build] member {mid} ({i}/{len(members)}) ...")
+        da = open_cache_fn(in_path, avail_start, avail_end)
+        da_diff = diff_fn(da, window_days=window_days)
+        save_spatial_netcdf(da_diff.astype("float32"), out_path, cache_var,
+                            time_chunk=365, y_chunk=64, x_chunk=64, units=units)
 
 def compute_cesm2_le_annual_median_2d(
     start_year: int,
@@ -433,7 +470,7 @@ def compute_cesm2_le_annual_median_2d(
     return median
 
 
-def compute_cesm2_le_2day_median_2d(
+def compute_cesm2_le_window_median_2d(
     start_year: int,
     end_year: int,
     model_dir: Path,
@@ -488,7 +525,7 @@ def compute_cesm2_le_2day_median_2d(
     return median
 
 
-def compute_cesm2_le_2day_p90_2d(
+def compute_cesm2_le_window_p90_2d(
     start_year: int,
     end_year: int,
     model_dir: "Path",
@@ -544,7 +581,7 @@ def compute_cesm2_le_2day_p90_2d(
     return result
 
 
-def compute_cesm2_le_2day_global_median_2d(
+def compute_cesm2_le_window_global_median_2d(
     start_year: int,
     end_year: int,
     model_dir: "Path",
@@ -636,7 +673,7 @@ def compute_cesm2_le_2day_global_median_2d(
     return global_median
 
 
-def compute_cesm2_le_2day_per_member_p90_2d(
+def compute_cesm2_le_window_per_member_p90_2d(
     start_year: int,
     end_year: int,
     model_dir: "Path",
@@ -799,7 +836,7 @@ def _season_time_mask(time_values, season: str) -> "np.ndarray":
     return np.isin(months, _SEASON_MONTHS[season.upper()])
 
 
-def compute_cesm2_le_2day_seasonal_global_median_2d(
+def compute_cesm2_le_window_seasonal_global_median_2d(
     season: str,
     start_year: int,
     end_year: int,
@@ -900,7 +937,7 @@ def compute_cesm2_le_2day_seasonal_global_median_2d(
     return global_median, stacked_medians
 
 
-def compute_cesm2_le_2day_seasonal_per_member_p90_2d(
+def compute_cesm2_le_window_seasonal_per_member_p90_2d(
     season: str,
     start_year: int,
     end_year: int,

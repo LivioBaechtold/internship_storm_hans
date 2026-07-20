@@ -928,6 +928,106 @@ def plot_single_catchment_weight_map(
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Joint-distribution scatter figures (compound flood-risk analysis)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Cyclic day-of-year colormap — 'hsv' reproduces the Blöschl et al. (2017)
+# colour wheel: Jan≈red → Mar≈yellow → May≈green → Jul≈cyan → Oct≈blue → Dec≈magenta.
+DOY_CMAP = plt.cm.hsv
+DOY_MAX  = 366   # day-of-year normalisation upper bound (leap-safe)
+
+JOINT_VAR_TITLES: dict[str, str] = {
+    "precipitation": "Precipitation Sum",
+    "soil_moisture": "Soil-Moisture Mean",
+    "snowmelt":      "Snowmelt (SWE Difference)",
+}
+JOINT_VAR_AXIS_LABELS: dict[str, str] = {
+    "precipitation": "Precipitation Sum (mm)",
+    "soil_moisture": "Soil Moisture Mean (kg/m²)",
+    "snowmelt":      "Snowmelt (SWE Difference) (kg/m²)",
+}
+
+
+def add_month_color_wheel(fig, rect: tuple = (0.815, 0.60, 0.13, 0.13)) -> None:
+    """Circular Jan–Dec day-of-year colour legend (paper-style wheel).
+    January sits at the top; months run clockwise (Jan → Apr → Jul → Oct)."""
+    WHEEL_INNER_RADIUS = 0.60   # inner edge of the colour ring (fraction of radius)
+    MONTH_LABEL_FS     = 6      # font size of the Jan/Apr/Jul/Oct labels
+
+    ax = fig.add_axes(rect, projection="polar")
+    ax.set_theta_zero_location("N")
+    ax.set_theta_direction(-1)
+    theta_edges = np.linspace(0.0, 2.0 * np.pi, DOY_MAX + 1)
+    ring = (0.5 * (theta_edges[:-1] + theta_edges[1:]) / (2.0 * np.pi))
+    ax.pcolormesh(theta_edges, np.array([WHEEL_INNER_RADIUS, 1.0]),
+                  ring[np.newaxis, :], cmap=DOY_CMAP, vmin=0.0, vmax=1.0)
+    month_doy = {"Jan": 1, "Apr": 91, "Jul": 182, "Oct": 274}
+    ax.set_xticks([2.0 * np.pi * (d - 1) / DOY_MAX for d in month_doy.values()])
+    ax.set_xticklabels(list(month_doy.keys()), fontsize=MONTH_LABEL_FS)
+    ax.set_yticks([])
+    ax.set_ylim(0.0, 1.0)
+    ax.grid(False)
+    ax.spines["polar"].set_visible(False)
+
+
+def make_joint_distribution_figure(
+    x_vals: np.ndarray,
+    y_vals: np.ndarray,
+    doy_vals: np.ndarray,
+    x_variable: str,
+    y_variable: str,
+    window_days: int,
+    start_year: int,
+    end_year: int,
+    catchment_title: str,
+    n_members: int,
+    out_paths: list,
+) -> None:
+    """
+    Joint-distribution scatter of two catchment-averaged window quantities:
+    one point per (member, date), coloured by day of year, with a circular
+    Jan–Dec legend (Blöschl et al. 2017 style).
+    """
+    POINT_SIZE  = 3.0    # marker area — small because up to ~10^6 points are drawn
+    POINT_ALPHA = 0.35   # transparency so point-cloud density stays visible
+    SCATTER_DPI = 300    # raster resolution of the rasterized point layer in the PDF
+
+    TITLE_PAD     = 18     # points of whitespace between title and axes
+    AXIS_HEADROOM = 0.02   # fraction of the data range kept free above the maxima
+
+    fig, ax = plt.subplots(figsize=(7.6, 6.4))
+    fig.subplots_adjust(right=0.76)   # leave room for the month wheel
+    ax.scatter(x_vals, y_vals, c=doy_vals, cmap=DOY_CMAP, vmin=1, vmax=DOY_MAX,
+               s=POINT_SIZE, alpha=POINT_ALPHA, linewidths=0, rasterized=True)
+
+    # Open x-y axes instead of a full box; the point cloud starts exactly in
+    # the bottom-left corner (no margin below the minima), headroom only above.
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    x_min, x_max = float(np.nanmin(x_vals)), float(np.nanmax(x_vals))
+    y_min, y_max = float(np.nanmin(y_vals)), float(np.nanmax(y_vals))
+    ax.set_xlim(x_min, x_max + AXIS_HEADROOM * (x_max - x_min))
+    ax.set_ylim(y_min, y_max + AXIS_HEADROOM * (y_max - y_min))
+
+    ax.set_xlabel(JOINT_VAR_AXIS_LABELS[x_variable])
+    ax.set_ylabel(JOINT_VAR_AXIS_LABELS[y_variable])
+    ax.set_title(
+        f"Joint Distribution of {window_days}-Day {JOINT_VAR_TITLES[x_variable]} "
+        f"and {window_days}-Day {JOINT_VAR_TITLES[y_variable]}, "
+        f"{start_year}-{end_year}", fontsize=11, pad=TITLE_PAD)
+    ax.text(0.02, 0.98, f"{catchment_title} · CESM2-LE · {n_members} members",
+            transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.3")
+    ax.grid(alpha=0.25, linewidth=0.4)
+    add_month_color_wheel(fig)
+
+    for out_path in out_paths:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=SCATTER_DPI)
+        print(f"Saved → {out_path}")
+    plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Annual median / 2-day precipitation map figures
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1065,7 +1165,7 @@ def plot_annual_median_4panel(
     plt.close(fig)
 
 
-def plot_2day_median_2panel(
+def plot_window_median_2panel(
     da_cesm2,
     da_era5,
     catchments: dict,
@@ -1075,16 +1175,18 @@ def plot_2day_median_2panel(
     catchment_numbers: dict = None,
     catchment_legend_text: str = "",
     label_overrides: dict = None,
-    twoday_vmax: float = 14.0,
+    window_vmax: float = 14.0,
+    window_days: int = 2,
     annmedian_extent: tuple = (5.0, 14.0, 57.5, 64.0),
 ) -> None:
-    """2-panel figure: annual median of 2-day rolling precipitation, CESM2-LE and ERA5 0.5°."""
-    norm = mcolors.Normalize(vmin=0.0, vmax=twoday_vmax)
+    """2-panel figure: annual median of N-day rolling precipitation, CESM2-LE and ERA5 0.5°."""
+    norm = mcolors.Normalize(vmin=0.0, vmax=window_vmax)
+
     catchment_numbers = catchment_numbers or {}
 
     fig, axes = plt.subplots(1, 2, figsize=(13, 8.5),
                              subplot_kw={"projection": MAP_PROJ})
-    fig.suptitle(f"2-Day Precipitation Median ({start_year}–{end_year})",
+    fig.suptitle(f"{window_days}-Day Precipitation Median ({start_year}–{end_year})",
                  fontsize=18, fontweight="normal", x=0.5, y=1.01, ha="center")
 
     panels = [
@@ -1103,8 +1205,8 @@ def plot_2day_median_2panel(
 
     cbar_ax = fig.add_axes([0.19, -0.04, 0.50, 0.025])
     cbar = fig.colorbar(mesh_ref, cax=cbar_ax, orientation="horizontal",
-                        ticks=np.linspace(0, twoday_vmax, 8), extend="max")
-    cbar.set_label("2-Day Precipitation Median (mm)", fontsize=11)
+                        ticks=np.linspace(0, window_vmax, 8), extend="max")
+    cbar.set_label(f"{window_days}-Day Precipitation Median (mm)", fontsize=11)
     cbar.ax.tick_params(labelsize=10)
     cbar.ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
 
@@ -1237,7 +1339,7 @@ def _plot_diff_panel(
     return mesh
 
 
-def plot_2day_interp_3panel(
+def plot_window_interp_3panel(
     da_cesm2,
     da_era5_interp,
     da_diff,
@@ -1251,7 +1353,7 @@ def plot_2day_interp_3panel(
     catchment_numbers: dict = None,
     catchment_legend_text: str = "",
     label_overrides: dict = None,
-    twoday_vmax: float = 14.0,
+    window_vmax: float = 14.0,
     annmedian_extent: tuple = (5.0, 14.0, 57.5, 64.0),
     sig_cesm_higher: "np.ndarray | None" = None,
     sig_era5_higher: "np.ndarray | None" = None,
@@ -1268,7 +1370,7 @@ def plot_2day_interp_3panel(
         sig_legend_text : appended to catchment_legend_text box
     Hatches use zorder=3 so catchment borders (4) and labels (5) render above them.
     """
-    norm_seq = mcolors.Normalize(vmin=0.0, vmax=twoday_vmax)
+    norm_seq = mcolors.Normalize(vmin=0.0, vmax=window_vmax)
     diff_abs = _finite_max_abs(da_diff.values)
 
     norm_div = mcolors.TwoSlopeNorm(vmin=-diff_abs, vcenter=0.0, vmax=diff_abs)
@@ -1343,7 +1445,7 @@ def plot_2day_interp_3panel(
 
     cbar_seq_ax = fig.add_axes([0.10 + seq_layout_dx, -0.04, 0.39, 0.025])
     cbar_seq = fig.colorbar(mesh_seq, cax=cbar_seq_ax, orientation="horizontal",
-                            ticks=np.linspace(0, twoday_vmax, 8), extend="max")
+                            ticks=np.linspace(0, window_vmax, 8), extend="max")
     cbar_seq.set_label(seq_cbar_label, fontsize=10)
     cbar_seq.ax.tick_params(labelsize=9)
     cbar_seq.ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
@@ -1375,7 +1477,7 @@ def plot_2day_interp_3panel(
     plt.close(fig)
 
 
-def plot_2day_interp_diffonly(
+def plot_window_interp_diffonly(
     da_diff,
     catchments: dict,
     start_year: int,
@@ -1438,7 +1540,7 @@ def plot_2day_interp_diffonly(
     plt.close(fig)
 
 
-def plot_2day_interp_diffonly_sig(
+def plot_window_interp_diffonly_sig(
     da_diff,
     catchments: dict,
     start_year: int,
@@ -1523,7 +1625,7 @@ def plot_2day_interp_diffonly_sig(
     plt.close(fig)
 
 
-def plot_2day_interp_seasonal_4row_3col(
+def plot_window_interp_seasonal_4row_3col(
     seasonal_data: list,
     catchments: dict,
     start_year: int,
@@ -1535,7 +1637,7 @@ def plot_2day_interp_seasonal_4row_3col(
     catchment_numbers: dict = None,
     catchment_legend_text: str = "",
     label_overrides: dict = None,
-    twoday_vmax: float = 14.0,
+    window_vmax: float = 14.0,
     annmedian_extent: tuple = (5.0, 14.0, 57.5, 64.0),
     sig_legend_text: str = "",
 ) -> None:
@@ -1568,7 +1670,7 @@ def plot_2day_interp_seasonal_4row_3col(
 
 
     catchment_numbers = catchment_numbers or {}
-    norm_seq = mcolors.Normalize(vmin=0.0, vmax=twoday_vmax)
+    norm_seq = mcolors.Normalize(vmin=0.0, vmax=window_vmax)
 
     # Diverging norm: shared max-abs across all four seasons
     all_diff_vals = np.concatenate(
@@ -1717,7 +1819,7 @@ def plot_2day_interp_seasonal_4row_3col(
 
     cbar_seq_ax = fig.add_axes([seq_cbar_x, cbar_y, seq_cbar_w, cbar_h])
     cbar_seq = fig.colorbar(mesh_seq_ref, cax=cbar_seq_ax, orientation="horizontal",
-                            ticks=np.linspace(0, twoday_vmax, 8), extend="max")
+                            ticks=np.linspace(0, window_vmax, 8), extend="max")
     cbar_seq.set_label(seq_cbar_label, fontsize=10)
     cbar_seq.ax.tick_params(labelsize=9)
     cbar_seq.ax.xaxis.set_major_formatter(mticker.FormatStrFormatter("%.1f"))
