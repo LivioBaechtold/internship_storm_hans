@@ -344,18 +344,24 @@ def cesm2_window_per_member_p90_cache_path(window_days: int, start_year: int, en
 
 
 # ── Seasonal analysis constants ────────────────────────────────────────────────
+# SEASONS_ORDER holds only the four standard seasons — it drives the 4×3
+# seasonal figure and the diagnostic loops, both of which require exactly 4.
+# Extra custom windows below are addressable by key but stay out of that list.
 SEASONS_ORDER: list[str] = ["DJF", "MAM", "JJA", "SON"]
+
 SEASON_LABELS: dict[str, str] = {
-    "DJF": "Winter (DJF)",
-    "MAM": "Spring (MAM)",
-    "JJA": "Summer (JJA)",
-    "SON": "Autumn (SON)",
+    "DJF":  "Winter (DJF)",
+    "MAM":  "Spring (MAM)",
+    "JJA":  "Summer (JJA)",
+    "SON":  "Autumn (SON)",
+    "MAMJ": "Spring (MAMJ)",   # extended spring incl. June
 }
 SEASON_MONTHS: dict[str, list[int]] = {
-    "DJF": [12, 1, 2],
-    "MAM": [3, 4, 5],
-    "JJA": [6, 7, 8],
-    "SON": [9, 10, 11],
+    "DJF":  [12, 1, 2],
+    "MAM":  [3, 4, 5],
+    "JJA":  [6, 7, 8],
+    "SON":  [9, 10, 11],
+    "MAMJ": [3, 4, 5, 6],
 }
 
 
@@ -401,6 +407,19 @@ def p90_seasonal_precip_sig_diff_paths(fig_subdir: str, window_days: int, start_
     """Paths for 4×3 seasonal significance-hatched 90th-pctile diff figure."""
     return precip_map_figure_paths(
         fig_subdir, f"{acc_tag(window_days)}median_seasonal_90pctl_precip_{pctl_tag}_diff_{start_year}-{end_year}.pdf")
+
+
+def p90_single_season_precip_sig_diff_paths(fig_subdir: str, window_days: int, season: str,
+                                            start_year: int, end_year: int, pctl_tag: str) -> list:
+    """Paths for the 3-panel single-season significance-hatched 90th-pctile diff figure.
+
+    Same 1x3 layout as `p90_precip_sig_diff_paths`, but restricted to one season.
+    `pctl_tag` must keep the '{lo}_{hi}pctl' form (e.g. '2_98pctl') so that
+    `plot_window_interp_3panel` picks the same colorbar offset as the annual figure.
+    """
+    return precip_map_figure_paths(
+        fig_subdir,
+        f"{acc_tag(window_days)}median_{season}_90pctl_precip_{pctl_tag}_diff_{start_year}-{end_year}.pdf")
 
 
 # Era5-Interpolated Annual Caches Paths

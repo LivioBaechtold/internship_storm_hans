@@ -8,6 +8,7 @@ import xarray as xr
 import numpy as np
 from pathlib import Path
 import pandas as pd
+import config_paths as cfg
 
 
 def find_era5_files(era5_dir: Path, resolution: str) -> list[Path]:
@@ -499,12 +500,9 @@ def compute_era5_interpolated_window_p90_2d(
     return out
 
 # ── Seasonal filtering helpers ─────────────────────────────────────────────────
-_SEASON_MONTHS: dict[str, list[int]] = {
-    "DJF": [12, 1, 2],
-    "MAM": [3, 4, 5],
-    "JJA": [6, 7, 8],
-    "SON": [9, 10, 11],
-}
+# Single source of truth lives in config_paths.py — custom windows such as
+# "MAMJ" are then picked up here and in data_smile.py without further edits.
+_SEASON_MONTHS: dict[str, list[int]] = cfg.SEASON_MONTHS
 
 
 def _filter_season_da(da: "xr.DataArray", season: str) -> "xr.DataArray":

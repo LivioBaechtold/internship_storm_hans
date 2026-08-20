@@ -15,6 +15,7 @@ import xarray as xr
 import numpy as np
 import pandas as pd
 from pathlib import Path
+import config_paths as cfg
 
 
 # ── Filename patterns ──────────────────────────────────────────────────────
@@ -816,13 +817,11 @@ def compute_significance_masks(
 
     return sig_cesm_higher, sig_era5_higher
 
-    # ── Seasonal helpers ───────────────────────────────────────────────────────────
-_SEASON_MONTHS: dict[str, list[int]] = {
-    "DJF": [12, 1, 2],
-    "MAM": [3, 4, 5],
-    "JJA": [6, 7, 8],
-    "SON": [9, 10, 11],
-}
+
+# ── Seasonal helpers ──────────────────────────────────────────────────────────
+# Single source of truth lives in config_paths.py (see data_era5.py).
+_SEASON_MONTHS: dict[str, list[int]] = cfg.SEASON_MONTHS
+
 
 def _season_time_mask(time_values, season: str) -> "np.ndarray":
     """Boolean array selecting timesteps whose month belongs to season."""

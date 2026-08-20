@@ -806,6 +806,91 @@ def _check_series_reasonableness(
             f"{max_val:.1f} mm (min = {min_val:.1f} mm). "
             "This is unusually large; verify SMILE tp24 units.")
 
+
+# ── Compound absolute-threshold statistics (joint-distribution analysis) ──────
+# Normalised compound score  s = x/x_max + y/y_max  for the two variables of a
+# joint-distribution pair; s >= threshold marks a compound extreme. Pure array
+# maths, no I/O. Consumed by the threshold cell of
+# compound_flood_risk_analysis.ipynb, which hands x_max/y_max on to
+# plot_style.make_joint_distribution_figure(threshold=...) so the drawn line and
+# the printed statistics always use identical denominators.
+
+def compound_threshold_stats(
+    x_vals: np.ndarray,
+    y_vals: np.ndarray,
+    threshold: float,
+    x_max: float | None = None,
+    y_max: float | None = None,
+) -> dict:
+    """
+    Absolute compound-threshold statistics for one (x, y) sample.
+
+    Parameters
+    ----------
+    x_vals, y_vals : np.ndarray
+        Flattened (member × date) values of the two joint-distribution
+        variables — the same arrays that are scattered in the figure.
+    threshold : float
+        Right-hand side of  x/x_max + y/y_max >= threshold  (e.g. 0.9).
+    x_max, y_max : float, optional
+        Normalisation maxima. Default: the sample maxima of the finite pairs,
+        i.e. the maxima of exactly the period/member selection that is plotted.
+
+    Returns
+    -------
+    dict
+        x_max, y_max, threshold : denominators and criterion actually used
+        score                   : x/x_max + y/y_max for every point
+        mask                    : bool array, finite AND score >= threshold
+        n_total, n_exceed, frac_exceed : sample size, exceedances, fraction
+        x_at_y0                 : x where the threshold line crosses y = 0
+        y_at_x0                 : y where the threshold line crosses x = 0
+    """
+    x = np.asarray(x_vals, dtype=float).ravel()
+    y = np.asarray(y_vals, dtype=float).ravel()
+    if x.size != y.size:
+        raise ValueError(
+            f"x_vals and y_vals must have the same length ({x.size} vs {y.size}).")
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    if not finite.any():
+        raise ValueError(
+            "compound_threshold_stats: no finite (x, y) pairs — check the "
+            "selected variables/period in the joint-distribution cell of "
+            "compound_flood_risk_analysis.ipynb.")
+
+    x_max = float(np.nanmax(x[finite])) if x_max is None else float(x_max)
+    y_max = float(np.nanmax(y[finite])) if y_max is None else float(y_max)
+    if x_max <= 0.0 or y_max <= 0.0:
+        raise ValueError(
+            f"Normalisation maxima must be > 0 (got x_max={x_max}, y_max={y_max}); "
+            "x/x_max + y/y_max is undefined otherwise.")
+    if threshold <= 0.0:
+        raise ValueError(
+            f"threshold must be > 0 (got {threshold}). "
+            "→ Set JD_THRESHOLD in the threshold cell of "
+            "compound_flood_risk_analysis.ipynb.")
+    if threshold > 2.0:
+        print(f"  [warning] threshold={threshold:g} is above the maximum possible "
+              "score of 2.0 (both variables simultaneously at their maximum) — "
+              "no point can satisfy the criterion.")
+
+    score = x / x_max + y / y_max
+    mask  = finite & (score >= threshold)
+    n_total, n_exceed = int(finite.sum()), int(mask.sum())
+    return {
+        "x_max":       x_max,
+        "y_max":       y_max,
+        "threshold":   float(threshold),
+        "score":       score,
+        "mask":        mask,
+        "n_total":     n_total,
+        "n_exceed":    n_exceed,
+        "frac_exceed": n_exceed / n_total,
+        "x_at_y0":     float(threshold) * x_max,
+        "y_at_x0":     float(threshold) * y_max,
+    }
+
 # ── SMILE ensemble aggregation ─────────────────────────────────────────────
 def pool_member_annual_maxima(member_annual_maxima: list[pd.Series]) -> pd.Series:
     """

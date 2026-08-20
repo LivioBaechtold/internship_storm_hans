@@ -65,7 +65,9 @@ No plotting, no data loading, no statistical logic. Everything else imports from
 | `cesm2_window_global_median_cache_path(start, end)` | function | Cache path for the CESM2-LE true global N-day median (all members × time) |
 | `cesm2_window_per_member_medians_cache_path(start, end)` | function | Cache path for stacked per-member N-day medians `[n_members, lat, lon]` |
 | `cesm2_window_per_member_p90_cache_path(start, end)` | function | Cache path for stacked per-member N-day 90th-pctile fields `[n_members, lat, lon]` |
-| `SEASONS_ORDER`, `SEASON_LABELS`, `SEASON_MONTHS` | constants | Season ordering, display labels, and month lists for DJF/MAM/JJA/SON |
+| `SEASONS_ORDER` | constant | `["DJF", "MAM", "JJA", "SON"]` — the four standard seasons only; drives the 4×3 seasonal figure and the diagnostic loops, both of which require exactly 4 entries. Custom windows must NOT be added here |
+| `SEASON_LABELS` | constant | Season key → plot label, e.g. `"MAM"` → `"Spring (MAM)"`, `"MAMJ"` → `"Spring (MAMJ)"` |
+| `SEASON_MONTHS` | constant | Season key → month numbers; **single source of truth**, imported by `data_era5._SEASON_MONTHS` and `data_smile._SEASON_MONTHS`. Includes the custom 4-month window `"MAMJ"` → `[3, 4, 5, 6]`. Add new windows here only |
 | `era5_interp_window_seasonal_median_cache_path(season, start, end)` | function | Cache for ERA5-interp seasonal N-day median |
 | `era5_interp_window_seasonal_p90_cache_path(season, start, end)` | function | Cache for ERA5-interp seasonal N-day 90th-pctile |
 | `cesm2_window_seasonal_global_median_cache_path(season, start, end)` | function | Cache for CESM2-LE seasonal global median `[lat, lon]` |
@@ -74,6 +76,7 @@ No plotting, no data loading, no statistical logic. Everything else imports from
 | `cesm2_window_seasonal_per_member_p90_cache_path(season, start, end)` | function | Cache for CESM2-LE per-member seasonal 90th-pctile `[n_members, lat, lon]` |
 | `median_seasonal_precip_sig_diff_paths(fig_subdir, start, end, pctl_tag)` | function | Paths for 4×3 seasonal significance-hatched N-day median diff — `{N}daymedian_seasonal_precip_{pctl_tag}_diff_*.pdf` |
 | `p90_seasonal_precip_sig_diff_paths(fig_subdir, start, end, pctl_tag)` | function | Paths for 4×3 seasonal significance-hatched 90th-pctile diff — `{N}daymedian_seasonal_90pctl_precip_{pctl_tag}_diff_*.pdf` |
+| `p90_single_season_precip_sig_diff_paths(fig_subdir, window_days, season, start, end, pctl_tag)` | function | Paths for the 3-panel **single-season** significance-hatched 90th-pctile diff — `{N}daymedian_{season}_90pctl_precip_{pctl_tag}_diff_*.pdf`; same 1×3 layout as the annual figure, `pctl_tag` must keep the `{lo}_{hi}pctl` form so `plot_window_interp_3panel` selects the identical colorbar offset |
 
 
 ---
@@ -98,7 +101,7 @@ No plotting, no data loading, no statistical logic. Everything else imports from
 | `save_era5_interpolated_field_diff_overall(era5_interp_dir, in_path_fn, out_path_fn, cache_var, diff_fn, open_cache_fn, window_days, units, force)` | function | Build the ERA5-interp daily N-day snowmelt cache from the 1-day cache via `diff_fn` (max(0,−ΔSWE): positive melt, gains→0) over the full record |
 | `compute_era5_interpolated_window_median_2d(start, end, ...)` | function | N-day rolling median from ERA5-interpolated cache |
 | `compute_era5_interpolated_window_p90_2d(start, end, ..., p90_cache_path, ...)` | function | 90th percentile of N-day rolling sums from ERA5-interpolated; caches result; reads cache by trying both `twoday_p90_precip` and legacy `twodayp90_precip` variable names |
-| `_SEASON_MONTHS` | constant | Module-level dict mapping season abbreviation → month list |
+| `_SEASON_MONTHS` | constant | Alias of `cfg.SEASON_MONTHS` (no longer a private copy) — any season key added to `config_paths.py` is available to `_filter_season_da` automatically |
 | `_filter_season_da(da, season)` | function | Select time steps in a DataArray whose month belongs to the given season |
 | `compute_era5_interpolated_window_seasonal_median_2d(season, start, end, ...)` | function | Seasonal median of N-day rolling sums from ERA5-interpolated cache; caches result |
 | `compute_era5_interpolated_window_seasonal_p90_2d(season, start, end, ...)` | function | Seasonal 90th percentile of N-day rolling sums from ERA5-interpolated cache; caches result |
@@ -140,7 +143,7 @@ Supports `cesm2_le` and `gfdl_spear_med_le`.
 | `compute_cesm2_le_window_global_median_2d(start, end, model_dir, ..., global_median_cache_path, per_member_medians_cache_path, ...)` | function | True global median of N-day rolling sums (all members × time) per pixel; simultaneously saves per-member medians `[n_members, lat, lon]` for significance testing |
 | `compute_cesm2_le_window_per_member_p90_2d(start, end, model_dir, ..., per_member_p90_cache_path, global_p90_cache_path, ...)` | function | Per-member 90th-pctile N-day fields `[n_members, lat, lon]` plus global p90; saves two caches |
 | `compute_significance_masks(da_era5, per_member_da, lower_pctl, upper_pctl)` | function | Direct percentile-rank significance test (no FDR): marks a pixel significant if `n_greater >= round(upper_pctl/100 * n_members)` (ERA5 ≤ lower pctile → `sig_cesm_higher`) or `n_less >= threshold` (ERA5 ≥ upper pctile → `sig_era5_higher`); NaN pixels set to False; returns `(sig_cesm_higher, sig_era5_higher)` bool arrays |
-| `_SEASON_MONTHS` | constant | Module-level dict mapping season abbreviation → month list |
+| `_SEASON_MONTHS` | constant | Alias of `cfg.SEASON_MONTHS` (no longer a private copy) — any season key added to `config_paths.py` is available to `_season_time_mask` automatically |
 | `_season_time_mask(time_values, season)` | Returns boolean mask selecting timesteps in the given season's months; handles both `numpy.datetime64` and `cftime.DatetimeNoLeap` time axes | private helper |
 | `compute_cesm2_le_window_seasonal_global_median_2d(season, start, end, ...)` | function | Seasonal true global median + per-member medians of N-day rolling sums; saves two caches |
 | `compute_cesm2_le_window_seasonal_per_member_p90_2d(season, start, end, ...)` | function | Seasonal per-member 90th-pctile fields + global 90th-pctile; saves two caches |
@@ -343,6 +346,7 @@ by the analysis notebooks. Run once (or after raw data / grids change) before
 12. Significance-hatched 90th-pctile diff cell — loads `cesm2_window_per_member_p90` cache, calls `compute_significance_masks` at 5/95 and 2/98 pctile, plots via `plot_window_interp_3panel` with sig overlays
 13. Seasonal data computation cell — `compute_era5_interpolated_window_seasonal_median_2d`, `compute_era5_interpolated_window_seasonal_p90_2d`, `compute_cesm2_le_window_seasonal_global_median_2d`, `compute_cesm2_le_window_seasonal_per_member_p90_2d` for all 4 seasons; stores results in `SEASONAL_MEDIAN_DATA` / `SEASONAL_P90_DATA` dicts keyed by season
 14. Seasonal significance plot cell — `_build_seasonal_list` helper calls `compute_significance_masks` per season then calls `plot_window_interp_seasonal_4row_3col` four times (5/95 median, 2/98 median, 5/95 p90, 2/98 p90) → four PDFs in `precip_maps_hans/`
+15. Spring-only (MAM) 3-panel significance cell — fully self-contained (needs only the setup cell; re-defines `catchments_maps` and `SIG_LEGEND_2_98` locally): calls `compute_era5_interpolated_window_seasonal_p90_2d` + `compute_cesm2_le_window_seasonal_per_member_p90_2d` for `MAM` only (cache reads), then `compute_significance_masks` at 2/98 and `plot_window_interp_3panel` → `2daymedian_MAM_90pctl_precip_2_98pctl_diff_*.pdf` in `precip_maps_hans/`; identical layout to the annual 90th-pctl figure, only the diverging colorbar range differs (data-driven); the `SPRING` key accepts any `cfg.SEASON_MONTHS` entry, including the 4-month `"MAMJ"` (Mar–Jun) window — the first run for a new key builds its caches from the 100 per-member daily caches
 
 
 ---
@@ -373,6 +377,8 @@ omitted (they need SeNorge/native-ERA5, absent for SWE/SM).
 5. Diagnostic pixel tables (no PDF)
 6. Seasonal data computation — `compute_cesm2_le_window_seasonal_global_median_2d`/`per_member_p90_2d`, `compute_era5_interpolated_window_seasonal_median_2d`/`_p90_2d`
 7. Seasonal significance 4×3 plots — `plot_window_interp_seasonal_4row_3col`
+7b. Spring-only (MAM) 3-panel significance plot — standalone (needs only the setup cell): calls `compute_cesm2_le_window_seasonal_per_member_p90_2d` + `compute_era5_interpolated_window_seasonal_p90_2d` for `MAM` with `force_recompute=False` (cache reads), then `compute_significance_masks` at 2/98 and `plot_window_interp_3panel` → `2daymedian_MAM_90pctl_{var_word}_2_98pctl_diff_*.pdf`; variables selected via `SPRING_VARS` (default `["snowmelt"]`); the `SPRING` key accepts any `cfg.SEASON_MONTHS` entry, including the 4-month `"MAMJ"` (Mar–Jun) window — the first run for a new key builds its caches from the 100 per-member daily caches
+
 8. Seasonal diagnostic (vmax calibration, no PDF)
 9. Catchment-3 (Losna) per-member strip plots → `diagnostic_catchment3_*` PDFs
 10. Joint-distribution scatter — selection block (`JD_CATCHMENT`, `JD_COMBO`, `JD_WINDOW_DAYS`, `JD_START`/`JD_END`, `JD_MEMBERS`) → `load_cesm2_le_catchment_field_series` (validated, with build-it-here error messages) → `make_joint_distribution_figure` (day-of-year colours + month wheel) → `joint_distribution_{N}day_{var1}_{var2}_{catchment}_{start}-{end}.pdf` in `compound_flood_risk_output/`

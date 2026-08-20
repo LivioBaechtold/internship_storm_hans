@@ -17,6 +17,8 @@ import xarray as xr
 import geopandas as gpd
 import matplotlib.colors as mcolors
 import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D   # proxy handles for manually built legends
+
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 import matplotlib.gridspec as gridspec
@@ -946,6 +948,16 @@ JOINT_VAR_AXIS_LABELS: dict[str, str] = {
     "soil_moisture": "Soil Moisture Mean (kg/m²)",
     "snowmelt":      "Snowmelt (SWE Difference) (kg/m²)",
 }
+# Short variable names used INSIDE the mathtext threshold formula — kept compact
+# so both fractions still fit in the legend column next to the month wheel.
+JOINT_VAR_FORMULA_NAMES: dict[str, str] = {
+    "precipitation": "Precip.",
+    "soil_moisture": "Soil Moisture",
+    "snowmelt":      "Snowmelt",
+}
+# ONE style dict for the absolute-threshold line AND its legend handle, so the
+# drawn line and the legend sample can never drift apart.
+THRESHOLD_LINE_KW: dict = dict(color="0.15", linewidth=1.6, linestyle=(0, (7, 4)))
 
 
 def add_month_color_wheel(fig, rect: tuple = (0.815, 0.60, 0.13, 0.13)) -> None:
@@ -970,6 +982,53 @@ def add_month_color_wheel(fig, rect: tuple = (0.815, 0.60, 0.13, 0.13)) -> None:
     ax.spines["polar"].set_visible(False)
 
 
+def add_absolute_threshold_legend(
+    fig,
+    x_variable: str,
+    y_variable: str,
+    threshold: float,
+    anchor: tuple = (0.88, 0.555),
+) -> None:
+    """
+    Legend entry for the absolute compound threshold, centred under the month wheel.
+
+    Parameters
+    ----------
+    fig : Figure
+        Figure created by `make_joint_distribution_figure`.
+    x_variable, y_variable : str
+        Joint-distribution variable keys; short names come from
+        `JOINT_VAR_FORMULA_NAMES`.
+    threshold : float
+        Right-hand side of  x/max(x) + y/max(y) >= threshold.
+    anchor : tuple
+        (x, y) in FIGURE coordinates — top-centre of the legend block. The
+        default sits directly below the month-wheel rect (0.815, 0.60, …), i.e.
+        the threshold entry always lands under the colour legend.
+
+    Returns
+    -------
+    None — the legend is attached to `fig`.
+    """
+    TITLE_FS = 8.5   # "Absolute Threshold" heading — same weight as the in-axes note (8)
+    LABEL_FS = 7.5   # mathtext formula — one step smaller so both fractions stay compact
+
+    def _frac(name: str) -> str:
+        """Mathtext fraction 'name / max. name' (mathtext swallows plain spaces)."""
+        n = name.replace(" ", r"\ ")
+        return r"\frac{\mathrm{" + n + r"}}{\mathrm{max.\ " + n + r"}}"
+
+    formula = ("$" + _frac(JOINT_VAR_FORMULA_NAMES[x_variable])
+               + r" + " + _frac(JOINT_VAR_FORMULA_NAMES[y_variable])
+               + r" \geq " + f"{threshold:g}$")
+
+    leg = fig.legend([Line2D([], [], **THRESHOLD_LINE_KW)], [formula],
+                     title="Absolute Threshold", loc="upper center",
+                     bbox_to_anchor=anchor, frameon=False, fontsize=LABEL_FS,
+                     handlelength=2.2, handletextpad=0.6, borderaxespad=0.0)
+    leg.get_title().set_fontsize(TITLE_FS)
+
+
 def make_joint_distribution_figure(
     x_vals: np.ndarray,
     y_vals: np.ndarray,
@@ -982,11 +1041,28 @@ def make_joint_distribution_figure(
     catchment_title: str,
     n_members: int,
     out_paths: list,
+    threshold: float | None = None,
+    x_norm_max: float | None = None,
+    y_norm_max: float | None = None,
 ) -> None:
     """
     Joint-distribution scatter of two catchment-averaged window quantities:
     one point per (member, date), coloured by day of year, with a circular
     Jan–Dec legend (Blöschl et al. 2017 style).
+
+    Parameters
+    ----------
+    threshold : float, optional
+        Absolute compound threshold. When given, the straight line
+        x / x_norm_max + y / y_norm_max = threshold is drawn dashed on top of
+        the point cloud (clipped to the axes) and labelled in a mathtext legend
+        under the month wheel. `None` (default) reproduces the plain figure
+        unchanged.
+    x_norm_max, y_norm_max : float, optional
+        Normalisation maxima of the criterion — required when `threshold` is
+        given. Pass `x_max` / `y_max` from
+        `catchment_tools.compound_threshold_stats()` so the drawn line and the
+        printed exceedance statistics always use identical denominators.
     """
     POINT_SIZE  = 3.0    # marker area — small because up to ~10^6 points are drawn
     POINT_ALPHA = 0.35   # transparency so point-cloud density stays visible
@@ -1018,6 +1094,21 @@ def make_joint_distribution_figure(
     ax.text(0.02, 0.98, f"{catchment_title} · CESM2-LE · {n_members} members",
             transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.3")
     ax.grid(alpha=0.25, linewidth=0.4)
+
+    # Absolute compound threshold: straight line y = y_max * (threshold - x/x_max).
+    # Drawn AFTER set_xlim/set_ylim so the frozen limits stay exactly as above and
+    # the line is simply clipped where it leaves the plotted data range.
+    if threshold is not None:
+        if not x_norm_max or not y_norm_max:
+            raise ValueError(
+                "make_joint_distribution_figure: `threshold` was given without "
+                "positive `x_norm_max` / `y_norm_max`. Pass the 'x_max'/'y_max' "
+                "entries returned by catchment_tools.compound_threshold_stats().")
+        x_line = np.array(ax.get_xlim())
+        y_line = y_norm_max * (threshold - x_line / x_norm_max)
+        ax.plot(x_line, y_line, zorder=5, **THRESHOLD_LINE_KW)
+        add_absolute_threshold_legend(fig, x_variable, y_variable, threshold)
+
     add_month_color_wheel(fig)
 
     for out_path in out_paths:
