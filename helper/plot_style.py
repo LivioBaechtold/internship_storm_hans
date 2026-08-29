@@ -18,6 +18,7 @@ import geopandas as gpd
 import matplotlib.colors as mcolors
 import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D   # proxy handles for manually built legends
+from matplotlib.patches import Patch    # proxy handles for shaded-band legend entries
 
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
@@ -982,6 +983,24 @@ def add_month_color_wheel(fig, rect: tuple = (0.815, 0.60, 0.13, 0.13)) -> None:
     ax.spines["polar"].set_visible(False)
 
 
+def threshold_formula_mathtext(x_variable: str, y_variable: str,
+                               threshold: float) -> str:
+    """
+    Mathtext 'x/max(x) + y/max(y) >= threshold' — ONE definition of the formula.
+
+    Shared by the joint-distribution legend and by the frequency-evolution legend
+    block, so the criterion can never be rendered two different ways. Mathtext
+    swallows plain spaces, hence the escaped ``\\ ``.
+    """
+    def _frac(name: str) -> str:
+        n = name.replace(" ", r"\ ")
+        return r"\frac{\mathrm{" + n + r"}}{\mathrm{max.\ " + n + r"}}"
+
+    return ("$" + _frac(JOINT_VAR_FORMULA_NAMES[x_variable])
+            + r" + " + _frac(JOINT_VAR_FORMULA_NAMES[y_variable])
+            + r" \geq " + f"{threshold:g}$")
+
+
 def add_absolute_threshold_legend(
     fig,
     x_variable: str,
@@ -998,7 +1017,7 @@ def add_absolute_threshold_legend(
         Figure created by `make_joint_distribution_figure`.
     x_variable, y_variable : str
         Joint-distribution variable keys; short names come from
-        `JOINT_VAR_FORMULA_NAMES`.
+        `JOINT_VAR_FORMULA_NAMES` via `threshold_formula_mathtext`.
     threshold : float
         Right-hand side of  x/max(x) + y/max(y) >= threshold.
     anchor : tuple
@@ -1013,20 +1032,14 @@ def add_absolute_threshold_legend(
     TITLE_FS = 8.5   # "Absolute Threshold" heading — same weight as the in-axes note (8)
     LABEL_FS = 7.5   # mathtext formula — one step smaller so both fractions stay compact
 
-    def _frac(name: str) -> str:
-        """Mathtext fraction 'name / max. name' (mathtext swallows plain spaces)."""
-        n = name.replace(" ", r"\ ")
-        return r"\frac{\mathrm{" + n + r"}}{\mathrm{max.\ " + n + r"}}"
-
-    formula = ("$" + _frac(JOINT_VAR_FORMULA_NAMES[x_variable])
-               + r" + " + _frac(JOINT_VAR_FORMULA_NAMES[y_variable])
-               + r" \geq " + f"{threshold:g}$")
+    formula = threshold_formula_mathtext(x_variable, y_variable, threshold)
 
     leg = fig.legend([Line2D([], [], **THRESHOLD_LINE_KW)], [formula],
                      title="Absolute Threshold", loc="upper center",
                      bbox_to_anchor=anchor, frameon=False, fontsize=LABEL_FS,
                      handlelength=2.2, handletextpad=0.6, borderaxespad=0.0)
     leg.get_title().set_fontsize(TITLE_FS)
+
 
 
 def make_joint_distribution_figure(
@@ -1116,6 +1129,219 @@ def make_joint_distribution_figure(
         fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=SCATTER_DPI)
         print(f"Saved → {out_path}")
     plt.close(fig)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Compound-extreme frequency-evolution figures (rolling-window analysis)
+# ═══════════════════════════════════════════════════════════════════════════
+# Layout: single panel on top, explanatory block below the axes
+# with the line/patch samples in the left column and the selections in the right.
+
+COMPOUND_VAR_DISPLAY_NAMES: dict[str, str] = {
+    "precipitation": "Precipitation",
+    "snowmelt":      "Snowmelt",
+    "soil_moisture": "Soil Moisture",
+}
+FREQ_AXIS_LABEL  = "Compound Extremes (events per year)"   # Figure 1 y-axis
+SN_AXIS_LABEL    = "Signal-to-noise-ratio (unitless)"      # Figure 2 y-axis
+FREQ_MAIN_COLOR  = MODEL_COLORS["cesm2_le"]   # ensemble-mean / pooled line
+FREQ_BAND_COLOR  = "#BBD7EA"                  # ±1σ band, lighter than the mean
+FREQ_ENV_COLOR   = "0.55"                     # ensemble-spread envelope, deliberately subordinate
+FREQ_FIG_DPI     = 300                        # rasterised content in the saved PDF
+
+FREQ_FIGSIZE    = (9.2, 7.0)   # wide enough for the two-column legend block
+FREQ_AXES_BOX   = dict(left=0.095, right=0.975, top=0.905, bottom=0.345)
+FREQ_LEG_TOP    = 0.255        # top of the legend block, figure fraction
+FREQ_LEG_LEFT   = 0.085        # left column x, figure fraction
+FREQ_SEL_LEFT   = 0.600        # right (selection) column x, figure fraction
+FREQ_SEL_INDENT = 0.095        # gap between a bold selection key and its value
+FREQ_LEG_FS     = 8.0          # left-column font size
+FREQ_SEL_FS     = 7.5          # right-column font size — one step smaller
+FREQ_LINE_GAP   = 0.040        # vertical spacing of the selection lines
+
+
+def frequency_selection_lines(*, x_variable: str, y_variable: str, threshold: float,
+                              window_days: int, roll_years: int, n_members: int,
+                              norm_ref: tuple, season_label: str | None = None,
+                              extra: tuple = ()) -> list:
+    """Right-hand legend column: the selections that define the plotted numbers.
+
+    Returns (bold key, value) pairs. The season line is dropped when the season is
+    'all'. The threshold value reuses the same mathtext fraction expression as the
+    joint-distribution figure legend.
+    """
+    lines = [
+        ("Threshold:", threshold_formula_mathtext(x_variable, y_variable, threshold)),
+        ("Window:",    f"{window_days}-day events, {roll_years}-year centred rolling window"),
+        ("Ensemble:",  f"CESM2-LE, {n_members} members"),
+        ("Reference:", f"{norm_ref[0]}–{norm_ref[1]}"),
+    ]
+    if season_label:
+        lines.append(("Season:", season_label))
+    return lines + list(extra)
+
+
+def _frequency_figure(fig_title: str, y_label: str = FREQ_AXIS_LABEL):
+    """Shared axes skeleton for both frequency-evolution figures.
+
+    `y_label` defaults to the events-per-year label of Figure 1; Figure 2 passes
+    `SN_AXIS_LABEL`, so the geometry stays in ONE place for both.
+    """
+    fig, ax = plt.subplots(figsize=FREQ_FIGSIZE)
+    fig.subplots_adjust(**FREQ_AXES_BOX)
+    ax.set_title(fig_title, fontsize=11.5, pad=14)
+    ax.set_xlabel("Year")
+    ax.set_ylabel(y_label)
+    ax.grid(alpha=0.25, linewidth=0.4)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    return fig, ax
+
+
+def _finish_frequency_figure(fig, handles: list, labels: list, selection_lines: list,
+                             out_paths: list) -> None:
+    """Draw the two-column legend block below the axes and save to every path."""
+    fig.legend(handles, labels, loc="upper left",
+               bbox_to_anchor=(FREQ_LEG_LEFT, FREQ_LEG_TOP), frameon=False,
+               fontsize=FREQ_LEG_FS, handlelength=2.8, handletextpad=0.7,
+               labelspacing=0.62, borderaxespad=0.0)
+    for i, (key, value) in enumerate(selection_lines):
+        y = FREQ_LEG_TOP - i * FREQ_LINE_GAP
+        fig.text(FREQ_SEL_LEFT, y, key, va="top", ha="left",
+                 fontsize=FREQ_SEL_FS, fontweight="bold")
+        fig.text(FREQ_SEL_LEFT + FREQ_SEL_INDENT, y, value, va="top", ha="left",
+                 fontsize=FREQ_SEL_FS)
+    for out_path in out_paths:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, format="pdf", bbox_inches="tight", dpi=FREQ_FIG_DPI)
+        print(f"Saved → {out_path}")
+    plt.close(fig)
+
+
+def plot_internal_variability_trend(
+    window_centres: np.ndarray,
+    f_mean: np.ndarray,
+    sigma: np.ndarray,
+    f_min: np.ndarray,
+    f_max: np.ndarray,
+    *,
+    x_variable: str,
+    y_variable: str,
+    catchment_title: str,
+    start_year: int,
+    end_year: int,
+    roll_years: int,
+    selection_lines: list,
+    out_paths: list,
+    spread_show: tuple = ("std", "minmax"),
+    p025: np.ndarray | None = None,
+    p975: np.ndarray | None = None,
+) -> None:
+    """
+    Figure 1 — compound-extreme hazard frequency and its internal variability.
+
+    The ensemble-mean rate (events per year) is ALWAYS drawn. `spread_show`
+    adds, independently:
+      'std'      → the blue ±1 standard-deviation band across members,
+      'minmax'   → the dashed lowest/highest-member envelope,
+      'p025p975' → the dashed 2.5/97.5-percentile envelope across members.
+    'minmax' and 'p025p975' share one dashed style, so exactly one of them may be
+    selected (enforced in catchment_tools.validate_frequency_evolution_config).
+    All statistics come from catchment_tools; this only draws them.
+    """
+    SIGMA_ARROW_LW = 1.1    # width of the ±1σ magnitude arrow at the sample window
+    Y_HEADROOM     = 1.12   # top of the y-axis as a multiple of the highest envelope
+
+    x  = np.asarray(window_centres, float)
+    fm = np.asarray(f_mean, float)
+    sd = np.asarray(sigma, float)
+    fig, ax = _frequency_figure(
+        f"Compound ({COMPOUND_VAR_DISPLAY_NAMES[x_variable]} and "
+        f"{COMPOUND_VAR_DISPLAY_NAMES[y_variable]}) Hazard Frequency "
+        f"for {catchment_title} from {start_year}-{end_year}")
+
+    handles, labels, upper = [], [], [np.nanmax(fm)]
+    if "std" in spread_show:
+        ax.fill_between(x, fm - sd, fm + sd, color=FREQ_BAND_COLOR, alpha=0.75,
+                        linewidth=0, zorder=2)
+        handles.append(Patch(facecolor=FREQ_BAND_COLOR, edgecolor="none"))
+        labels.append("± 1 standard deviation")
+        upper.append(np.nanmax(fm + sd))
+
+    if "minmax" in spread_show:
+        ax.plot(x, f_min, color=FREQ_ENV_COLOR, lw=0.8, ls=(0, (1, 1.8)), zorder=3)
+        ax.plot(x, f_max, color=FREQ_ENV_COLOR, lw=0.8, ls=(0, (1, 1.8)), zorder=3)
+        handles.append(Line2D([], [], color=FREQ_ENV_COLOR, lw=0.8, ls=(0, (1, 1.8))))
+        labels.append("Ensemble spread (min/max member)")
+        upper.append(np.nanmax(f_max))
+
+    if "p025p975" in spread_show and p025 is not None:
+        ax.plot(x, p025, color=FREQ_ENV_COLOR, lw=0.9, ls=(0, (1, 2)), zorder=3)
+        ax.plot(x, p975, color=FREQ_ENV_COLOR, lw=0.9, ls=(0, (1, 2)), zorder=3)
+        handles.append(Line2D([], [], color=FREQ_ENV_COLOR, lw=0.9, ls=(0, (1, 2))))
+        labels.append("Ensemble spread (2.5/97.5-%)")
+        upper.append(np.nanmax(p975))
+
+    ax.plot(x, fm, color=FREQ_MAIN_COLOR, lw=2.2, zorder=5)
+    handles.insert(0, Line2D([], [], color=FREQ_MAIN_COLOR, lw=2.2))
+    labels.insert(0, "Ensemble mean")
+
+    ax.set_xlim(x.min(), x.max())
+    ax.set_ylim(0.0, float(np.nanmax(upper)) * Y_HEADROOM)
+
+    if "std" in spread_show:
+        # σ-magnitude arrow at the central window — the quantity the figure is about.
+        # Clipped at the axis floor: for rare events fm − σ is negative, and an
+        # unclipped arrow would run out of the axes and through the x-label.
+        i = len(x) // 2
+        y_lo = max(fm[i] - sd[i], ax.get_ylim()[0])
+        ax.annotate("", xy=(x[i], fm[i] + sd[i]), xytext=(x[i], y_lo),
+                    arrowprops=dict(arrowstyle="<->", lw=SIGMA_ARROW_LW, color="0.2"),
+                    zorder=7)
+        ax.text(x[i] + 0.01 * (x.max() - x.min()), fm[i] + sd[i], r"$\pm\,1\sigma$",
+                ha="left", va="bottom", fontsize=8.5, color="0.2", zorder=7)
+
+    _finish_frequency_figure(fig, handles, labels, selection_lines, out_paths)
+
+
+def plot_signal_to_noise_ratio(
+    window_centres: np.ndarray,
+    s_to_n: np.ndarray,
+    *,
+    x_variable: str,
+    y_variable: str,
+    catchment_title: str,
+    start_year: int,
+    end_year: int,
+    selection_lines: list,
+    out_paths: list,
+) -> None:
+    """
+    Figure 2 — signal-to-noise ratio of the compound-extreme rate, per window.
+
+    S/N = ensemble mean / standard deviation ACROSS MEMBERS, unitless, computed
+    in catchment_tools.ensemble_frequency_statistics — this only draws it. Same
+    threshold, N-day window, member pool, frozen reference and season as
+    Figure 1 (it reads the same `ensemble` table), so both figures describe
+    exactly the same events and share the same legend block.
+    """
+    Y_HEADROOM = 1.12   # top of the y-axis as a multiple of the highest value
+
+    x, y = np.asarray(window_centres, float), np.asarray(s_to_n, float)
+    fig, ax = _frequency_figure(
+        f"Signal-to-noise-ratio Compound ({COMPOUND_VAR_DISPLAY_NAMES[x_variable]} "
+        f"and {COMPOUND_VAR_DISPLAY_NAMES[y_variable]}) Hazard "
+        f"for {catchment_title} from {start_year}-{end_year}",
+        y_label=SN_AXIS_LABEL)
+
+    ax.plot(x, y, color=FREQ_MAIN_COLOR, lw=2.2, zorder=5)
+    handles = [Line2D([], [], color=FREQ_MAIN_COLOR, lw=2.2)]
+    labels  = ["Signal-to-noise ratio (ensemble mean / standard deviation)"]
+
+    ax.set_xlim(x.min(), x.max())
+    ax.set_ylim(0.0, float(np.nanmax(y[np.isfinite(y)])) * Y_HEADROOM)
+
+    _finish_frequency_figure(fig, handles, labels, selection_lines, out_paths)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

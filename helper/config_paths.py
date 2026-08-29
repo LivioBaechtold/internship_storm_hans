@@ -72,6 +72,7 @@ CATCHMENTS = {
     "regine_drammen":   "Regine Drammen",
     "regine_glomma":    "Regine Glomma",}
 
+
 # ── Compound-analysis catchment drammen + glomma
 COMPOUND_CATCHMENTS: dict[str, str] = {
     "regine_drammen":        "Regine Drammen",
@@ -350,18 +351,18 @@ def cesm2_window_per_member_p90_cache_path(window_days: int, start_year: int, en
 SEASONS_ORDER: list[str] = ["DJF", "MAM", "JJA", "SON"]
 
 SEASON_LABELS: dict[str, str] = {
-    "DJF":  "Winter (DJF)",
-    "MAM":  "Spring (MAM)",
-    "JJA":  "Summer (JJA)",
-    "SON":  "Autumn (SON)",
-    "MAMJ": "Spring (MAMJ)",   # extended spring incl. June
+    "DJF":    "Winter (DJF)",
+    "MAM":    "Spring (MAM)",
+    "JJA":    "Summer (JJA)",
+    "SON":    "Autumn (SON)",
+    "MAMJ":   "Spring (MAMJ)",   # extended spring incl. June
 }
 SEASON_MONTHS: dict[str, list[int]] = {
-    "DJF":  [12, 1, 2],
-    "MAM":  [3, 4, 5],
-    "JJA":  [6, 7, 8],
-    "SON":  [9, 10, 11],
-    "MAMJ": [3, 4, 5, 6],
+    "DJF":    [12, 1, 2],
+    "MAM":    [3, 4, 5],
+    "JJA":    [6, 7, 8],
+    "SON":    [9, 10, 11],
+    "MAMJ":   [3, 4, 5, 6],
 }
 
 
@@ -471,6 +472,58 @@ def field_window_cache_path(model: str, kind: str, which: str, window_days: int,
     else:
         fname = f"{acc_tag(window_days)}_{seas}{which}_era5interp_{kind}_{start_year}-{end_year}.nc"
     return POSTPROC_DIR / model / kind / fname
+
+
+# ── Compound-extreme frequency-evolution output location + filenames ──────────
+# Sub-folder of the compound-analysis output
+COMPOUND_FREQ_FIG_SUBDIR: str = "compound_flood_risk_output/frequency_evolution"
+
+def compound_freq_figure_paths(fname: str) -> list:
+    """Both figure roots for one frequency-evolution output (PDF, CSV or JSON).
+
+    Example
+    -------
+    compound_freq_figure_paths("internal_variability_trend_2day_….pdf")
+        -> [FIGURES_DIR           / COMPOUND_FREQ_FIG_SUBDIR / "internal_variability_trend_2day_….pdf",
+            FIGURES_DIR_SECONDARY / COMPOUND_FREQ_FIG_SUBDIR / "internal_variability_trend_2day_….pdf"]
+    """
+    return precip_map_figure_paths(COMPOUND_FREQ_FIG_SUBDIR, fname)
+
+
+# ── Frequency-evolution filenames ─────────────────────────────────────────────
+def compound_freq_stem(figtype: str, window_days: int, x_variable: str, y_variable: str,
+                       catchment_slug: str, start_year: int, end_year: int,
+                       roll_years: int, threshold: float, norm_ref: tuple,
+                       season: str = "all", members="all") -> str:
+    """Shared filename stem for the frequency-evolution figures and data outputs.
+
+    figtype : 'internal_variability_trend' (Figure 1) | 'signal_to_noise' (Figure 2)
+
+    Every selection that changes the result appears in the stem, so two runs can
+    never overwrite each other. `norm_ref` is the FROZEN reference window that
+    fixes max(x)/max(y) and therefore the position of the threshold line, so two
+    runs differing only in the reference must not share a filename. The
+    `_{season}` and `_members{spec}` segments are appended ONLY when they differ
+    from the defaults, so the standard case stays clean. The threshold keeps its
+    decimal point (0.8, 0.85, 1.0).
+
+    Example
+    -------
+    signal_to_noise_2day_precipitation_snowmelt_regine_drammen_glomma_1920-2034_7year_thr0.75_ref1995-2024_MAMJ
+    """
+    thr = f"{float(threshold):.10g}"
+    if "." not in thr:
+        thr += ".0"
+    stem = (f"{figtype}_{acc_tag(window_days)}_{x_variable}_{y_variable}_"
+            f"{catchment_slug}_{start_year}-{end_year}_{roll_years}year_thr{thr}_"
+            f"ref{int(norm_ref[0])}-{int(norm_ref[1])}")
+    if str(season).lower() != "all":
+        stem += f"_{season}"
+    if not (isinstance(members, str) and members.strip().lower() == "all"):
+        stem += "_members" + (members.strip().lower().replace(",", "-").replace(" ", "")
+                              if isinstance(members, str)
+                              else "-".join(f"{int(m):03d}" for m in members))
+    return stem
 
 
 # ── GeoJSON filenames (canonical definition — imported by notebooks) ───────────

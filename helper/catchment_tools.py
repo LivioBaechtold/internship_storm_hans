@@ -3,6 +3,8 @@
 
 # Import important libraries
 import re
+import json
+from datetime import datetime, timezone
 import xarray as xr
 import numpy as np
 from pathlib import Path
@@ -724,8 +726,8 @@ def parse_member_selection(selection, available: list[str]) -> list[str]:
             "CESM2-LE SM & SWE exist for only 90 members (odd members 001–019 "
             "have no data), so the compound series contain exactly those 90 "
             "members for every variable, precipitation included.\n"
-            "→ Adjust JD_MEMBERS in the joint-distribution cell of "
-            "compound_flood_risk_analysis.ipynb.")
+            "→ Adjust JD_MEMBERS (joint-distribution cells) or FE_MEMBERS "
+            "(frequency-evolution cells) in compound_flood_risk_analysis.ipynb.")
     return requested
 
 
@@ -890,6 +892,418 @@ def compound_threshold_stats(
         "x_at_y0":     float(threshold) * x_max,
         "y_at_x0":     float(threshold) * y_max,
     }
+
+
+# ── Compound-extreme frequency evolution (rolling-window analysis) ────────────
+# Time-evolution counterpart of the static joint-distribution / threshold cells.
+# Pure data preparation + statistics — NO plotting (both figures live in
+# plot_style.plot_internal_variability_trend / plot_signal_to_noise_ratio).
+#
+# Definitions are IDENTICAL to `compound_threshold_stats`: compound severity
+# s = x/x_max + y/y_max, exceedance when s >= threshold. The only difference is
+# that x_max / y_max are FROZEN on the reference period AND on the selected
+# season, so the criterion is ONE fixed line in the (x, y) plane for every
+# rolling window and a drifting denominator can never masquerade as a change.
+#
+# Accepted limitations (deliberate — see the notebook selection block):
+#   • no declustering — one storm can exceed on up to FE_WINDOW_DAYS consecutive
+#     days, so an "event" here is an exceedance DAY;
+#   • rolling windows overlap by (L − FE_ROLL_STEP) years, so consecutive points
+#     are not independent — the curve is a display-only low-pass filter.
+
+# Figure-1 spread flags. "std" is the blue ±1σ band; "minmax" and "p025p975" are
+# the dashed envelope and are mutually exclusive (they share one line style).
+FREQ_SPREAD_KINDS   = ("std", "minmax", "p025p975")
+
+
+# ── Season handling ───────────────────────────────────────────────────────────
+def resolve_season_months(season) -> list[int] | None:
+    """Month numbers for a season selector; `None` means 'all months'.
+
+    season : "all" | key of cfg.SEASON_MONTHS ("DJF", "MAM", "MAMJ", …)
+             | (first_month, last_month), inclusive, wrapping over new year.
+    """
+    if isinstance(season, (tuple, list)):
+        m1, m2 = int(season[0]), int(season[1])
+        if not (1 <= m1 <= 12 and 1 <= m2 <= 12):
+            raise ValueError(f"FE_SEASON months must be in 1–12; got {season!r}.")
+        return list(range(m1, m2 + 1)) if m1 <= m2 else list(range(m1, 13)) + list(range(1, m2 + 1))
+    key = str(season).strip()
+    if key.lower() == "all":
+        return None
+    if key not in cfg.SEASON_MONTHS:
+        raise ValueError(f"FE_SEASON={season!r} unknown. Use 'all', an (m1, m2) tuple, "
+                         f"or one of {sorted(cfg.SEASON_MONTHS)} "
+                         "(new named windows go into cfg.SEASON_MONTHS).")
+    return list(cfg.SEASON_MONTHS[key])
+
+
+def season_tag(season) -> str:
+    """Filename tag for a season selector ('all' → 'all')."""
+    return (f"m{int(season[0]):02d}-m{int(season[1]):02d}"
+            if isinstance(season, (tuple, list)) else str(season).strip())
+
+
+def season_label(season) -> str:
+    """Legend label for a season selector."""
+    if isinstance(season, (tuple, list)):
+        return f"months {int(season[0]):02d}–{int(season[1]):02d}"
+    key = str(season).strip()
+    return "all months" if key.lower() == "all" else cfg.SEASON_LABELS.get(key, key)
+
+
+# ── Cache availability ────────────────────────────────────────────────────────
+def require_compound_series(catchment_slug: str, variables, window_days: int) -> list[Path]:
+    """Verify the CESM2-LE compound-series caches exist for every variable.
+
+    Returns the resolved cache paths; raises FileNotFoundError naming the exact
+    notebook cell and settings that build a missing selection.
+    """
+    cache_dir = cfg.POSTPROC_DIR / "cesm2_le" / "catchment_averaged"
+    found, missing = [], []
+    for var in variables:
+        hits = sorted(cache_dir.glob(f"post_processed_cesm2_le_{cfg.acc_tag(window_days)}_"
+                                     f"{catchment_slug}_{var}_*.nc"))
+        (found.append(hits[-1]) if hits else missing.append(var))
+    if missing:
+        raise FileNotFoundError(
+            f"No {window_days}-day compound-series cache for {missing} "
+            f"(catchment '{catchment_slug}') in\n    {cache_dir}\n"
+            "→ BUILD IT FIRST in load_data_store_postprocessed.ipynb, cell\n"
+            "     '# %% CESM2-LE compound extremes analysis:'\n"
+            f"   set   WINDOW_DAYS_COMPOUND = {window_days}\n"
+            f"   ensure COMPOUND_SLUGS      contains '{catchment_slug}'\n"
+            f"   ensure COMPOUND_VARIABLES  contains {missing}\n"
+            "   then re-run that cell and re-run this one. Its prerequisites (the "
+            "1-day spatial member caches) are already built for the full record.")
+    print(f"[ok] {window_days}-day caches present: {', '.join(p.name for p in found)}")
+    return found
+
+
+# ── Configuration validation ──────────────────────────────────────────────────
+def validate_frequency_evolution_config(config: dict) -> dict:
+    """Validate + normalise the FE_* selection block; raise with a clear message.
+
+    Adds `season_months`, `season_tag`, `record_start`/`record_end` and the
+    resolved cache paths to a copy of the config.
+    """
+    c = dict(config)
+    if c["catchment"] not in cfg.COMPOUND_CATCHMENTS:
+        raise ValueError(f"FE_CATCHMENT={c['catchment']!r} unknown; choose one of "
+                         f"{list(cfg.COMPOUND_CATCHMENTS)}.")
+
+    combo = tuple(c["combo"])
+    if len(combo) != 2 or combo[0] == combo[1] or any(v not in _CESM2_COMPOUND_SPECS for v in combo):
+        raise ValueError(f"FE_COMBO={combo!r} must be an ordered pair of two DIFFERENT "
+                         f"variables from {sorted(_CESM2_COMPOUND_SPECS)}.")
+    c["combo"] = combo
+
+    n = int(c["window_days"])
+    if not 1 <= n <= 4:
+        raise ValueError(f"FE_WINDOW_DAYS={n} outside the supported range 1–4.")
+    if "snowmelt" in combo and n < 2:
+        raise ValueError("FE_WINDOW_DAYS must be >= 2 when 'snowmelt' is selected "
+                         "(snowmelt = max(0, −(SWE(t) − SWE(t−(N−1))))).")
+    c["window_days"] = n
+
+    paths = require_compound_series(c["catchment"], combo, n)
+    m = re.search(r"_(\d{4})-(\d{4})\.nc$", paths[0].name)
+    rec_s, rec_e = int(m.group(1)), int(m.group(2))
+    c["cache_paths"], c["record_start"], c["record_end"] = paths, rec_s, rec_e
+
+    s, e = int(c["start_year"]), int(c["end_year"])
+    if s > e or s < rec_s or e > rec_e:
+        raise ValueError(f"FE_START/FE_END = {s}–{e} lies outside the stored record "
+                         f"{rec_s}–{rec_e} ({paths[0].name}).")
+    c["start_year"], c["end_year"] = s, e
+
+    L, step = int(c["roll_years"]), int(c["roll_step"])
+    if not 1 <= L <= (e - s + 1):
+        raise ValueError(f"FE_ROLL_YEARS={L} must be between 1 and the analysis-period "
+                         f"length {e - s + 1} years ({s}–{e}).")
+    if step < 1:
+        raise ValueError(f"FE_ROLL_STEP={step} must be >= 1.")
+    c["roll_years"], c["roll_step"] = L, step
+
+    if float(c["threshold"]) <= 0.0:
+        raise ValueError(f"FE_THRESHOLD={c['threshold']} must be > 0 (max possible score = 2.0).")
+    c["threshold"] = float(c["threshold"])
+
+    bad = [v for v in c["spread_show"] if v not in FREQ_SPREAD_KINDS]
+    if bad or not len(c["spread_show"]):
+        raise ValueError(f"FE_SPREAD_SHOW={tuple(c['spread_show'])!r} invalid; "
+                         f"pick any of {list(FREQ_SPREAD_KINDS)}.")
+    if "minmax" in c["spread_show"] and "p025p975" in c["spread_show"]:
+        raise ValueError("FE_SPREAD_SHOW: pick EITHER 'minmax' OR 'p025p975' — both are "
+                         "drawn as the same dashed envelope and would overlap.")
+    c["spread_show"] = tuple(c["spread_show"])
+
+    lo, hi = (int(v) for v in c["norm_ref"])
+    if lo > hi or lo < rec_s or hi > rec_e:
+        raise ValueError(f"FE_NORM_REF={lo}–{hi} must lie inside the stored record "
+                         f"{rec_s}–{rec_e}.")
+    c["norm_ref"] = (lo, hi)
+
+
+    c["season_months"] = resolve_season_months(c["season"])
+    c["season_tag"]    = season_tag(c["season"])
+    return c
+
+
+# ── Loading, frozen normalisation, severity ───────────────────────────────────
+def load_compound_pair(catchment_slug: str, combo: tuple, window_days: int
+                       ) -> tuple[xr.DataArray, xr.DataArray]:
+    """Full-record [member, time] pair for the two FE_COMBO variables, inner-aligned.
+
+    The N-day operator is already baked into the cache (applied to the FULL record
+    when it was built), so every rolling window below is complete by construction.
+    """
+    out = []
+    for var in combo:
+        da = load_cesm2_le_catchment_field_series(var, window_days, catchment_slug,
+                                                  None, None, "all")
+        da.load()      # pull the whole [member, time] array into memory and then
+        da.close()     # release the NetCDF handle — the cell is re-run often
+        out.append(da.transpose("member", "time"))
+    return xr.align(out[0], out[1], join="inner")
+
+
+def freeze_normalisation_maxima(da_x: xr.DataArray, da_y: xr.DataArray,
+                                ref_years: tuple, ref_members="all",
+                                season_months: list[int] | None = None
+                                ) -> tuple[float, float]:
+    """The FROZEN denominators (x_max, y_max) — sample maxima of the reference period.
+
+    Computed ONCE over exactly the population the criterion is later applied to:
+    the reference YEARS, the reference MEMBER pool and — when a season is
+    selected — ONLY the months of that season. Without the season restriction the
+    denominators would come from the annual maxima (e.g. an August storm) while
+    the exceedances are counted in MAMJ only, which pushes the threshold line far
+    too high and biases every window's count low.
+
+    Held constant across every rolling window and both figures: recomputing them
+    per window would move the threshold line and make any change partly an
+    artefact of a drifting denominator.
+
+    Parameters
+    ----------
+    da_x, da_y    : [member, time] arrays of the two FE_COMBO variables
+    ref_years     : (first, last) calendar years of the frozen reference period
+    ref_members   : member pool for the reference sample ("all" | "1-30" | list)
+    season_months : month numbers to keep, or None for all months — pass
+                    `config["season_months"]` so reference and analysis agree
+
+    Returns
+    -------
+    (x_max, y_max) : the two frozen denominators
+    """
+    mem   = parse_member_selection(ref_members, list(da_x["member"].values))
+    rx_da = subset_time_series_by_year(da_x.sel(member=mem), *ref_years)
+    ry_da = subset_time_series_by_year(da_y.sel(member=mem), *ref_years)
+    if season_months is not None:
+        keep  = np.isin(rx_da["time"].dt.month.values, season_months)
+        rx_da, ry_da = rx_da.isel(time=keep), ry_da.isel(time=keep)
+    rx, ry = rx_da.values.ravel(), ry_da.values.ravel()
+    ok = np.isfinite(rx) & np.isfinite(ry)
+    if not ok.any():
+        raise ValueError(
+            f"No finite (x, y) pairs in FE_NORM_REF {ref_years[0]}–{ref_years[1]}"
+            + ("" if season_months is None
+               else f" restricted to months {sorted(season_months)}") + ".")
+    x_max, y_max = float(np.max(rx[ok])), float(np.max(ry[ok]))
+    if x_max <= 0.0 or y_max <= 0.0:
+        raise ValueError(f"Frozen maxima must be > 0 (got x_max={x_max}, y_max={y_max}).")
+    return x_max, y_max
+
+
+# ── Annual counts → rolling windows → ensemble statistics ─────────────────────
+def annual_exceedance_counts(candidate: np.ndarray, exceed: np.ndarray,
+                             years_of_time: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Collapse the [member, time] masks to per-calendar-year counts [member, year].
+
+    Window membership is defined by CALENDAR YEAR (cftime/no-leap safe), not by
+    fixed day counts, so a season selection simply leaves the non-season days at
+    zero. `candidate` is kept in the signature as the documented denominator of
+    the counts even though only `exceed` is summed.
+    """
+    years = np.unique(years_of_time)
+    col   = np.searchsorted(years, years_of_time)
+    k_ary = np.zeros((exceed.shape[0], years.size), dtype=np.int64)
+    for m in range(exceed.shape[0]):
+        k_ary[m] = np.bincount(col, weights=exceed[m], minlength=years.size).astype(np.int64)
+    return years, k_ary
+
+
+def rolling_window_counts(years: np.ndarray, k_ary: np.ndarray, roll_years: int,
+                          roll_step: int = 1) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Exceedance counts per member in every COMPLETE centred rolling window.
+
+    Returns (window_starts [W], window_centres [W], counts [member, W]).
+    Window W = [y0, y0+L−1] is plotted at y0 + (L−1)/2 — half-years are kept, never
+    rounded. Only complete windows are produced, so the curve is shorter than the
+    analysis period by (L−1)/2 at each end and is NOT padded.
+    """
+    L, Y = int(roll_years), years.size
+    zero  = np.zeros((k_ary.shape[0], 1), dtype=np.int64)
+    k_cum = np.concatenate([zero, np.cumsum(k_ary, axis=1)], axis=1)
+    i0    = np.arange(0, Y - L + 1, int(roll_step))
+    return (years[i0], years[i0] + (L - 1) / 2.0, k_cum[:, i0 + L] - k_cum[:, i0])
+
+
+def ensemble_frequency_statistics(starts: np.ndarray, centres: np.ndarray,
+                                  counts: np.ndarray, *, roll_years: int
+                                  ) -> pd.DataFrame:
+    """Per-window ensemble statistics of the compound-extreme rate (events/year).
+
+    Per member the rate is K_m(W)/L; `f_mean` is both the ensemble mean AND the
+    pooled rate ΣK/(M·L), because all members share one time axis. `sigma` is the
+    sample standard deviation ACROSS MEMBERS — the internal-variability measure
+    Figure 1 draws as its ±1σ band, and the denominator of the unitless
+    signal-to-noise ratio of Figure 2 (S/N = f_mean / sigma).
+
+    Returns
+    -------
+    pd.DataFrame with one row per rolling window: window_start/end/centre,
+    n_members, n_events_total, mean_events_per_member, f_mean, sigma, min, max,
+    p025, p975, signal_to_noise.
+    """
+    rates = counts / float(roll_years)          # [member, window], events per year
+    out = pd.DataFrame({
+        "window_start":  starts.astype(int),
+        "window_end":    starts.astype(int) + roll_years - 1,
+        "window_centre": centres,
+        "n_members":     counts.shape[0],
+        "n_events_total": counts.sum(axis=0),
+        "mean_events_per_member": counts.mean(axis=0),
+        "f_mean": rates.mean(axis=0),
+        "sigma":  rates.std(axis=0, ddof=1),
+        "min":    rates.min(axis=0),
+        "max":    rates.max(axis=0),
+        # p025/p975 interpolate BETWEEN members, so unlike min/max they are not
+        # locked to the 1/roll_years granularity of an integer event count.
+        "p025":   np.percentile(rates,  2.5, axis=0),
+        "p975":   np.percentile(rates, 97.5, axis=0)})
+
+    # Signal-to-noise ratio of Figure 2: ensemble mean over the across-member
+    # standard deviation, unitless. Windows where sigma == 0 (every member has
+    # the same count) give inf/NaN and are left as such rather than masked.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        out["signal_to_noise"] = out["f_mean"] / out["sigma"]
+    return out
+
+
+# ── Orchestration ─────────────────────────────────────────────────────────────
+def run_compound_frequency_evolution(config: dict) -> dict:
+    """Full frequency-evolution analysis for one FE_* selection.
+
+    load pair → freeze maxima (reference years + reference members + SEASON) →
+    severity → season/candidate mask → exceedances → annual counts → rolling
+    windows → ensemble statistics (mean, σ, envelopes, S/N = mean/σ).
+    Returns everything the two figures, the CSV and the JSON need.
+    """
+    c = validate_frequency_evolution_config(config)
+    x_var, y_var = c["combo"]
+
+    da_x, da_y = load_compound_pair(c["catchment"], c["combo"], c["window_days"])
+    # The frozen line comes from EXACTLY the population it is later applied to:
+    # reference years, reference members and — when set — the season months only.
+    x_max, y_max = freeze_normalisation_maxima(
+        da_x, da_y, c["norm_ref"], c["norm_ref_members"], c["season_months"])
+    n_ref_members = len(parse_member_selection(c["norm_ref_members"],
+                                               list(da_x["member"].values)))
+
+    members = parse_member_selection(c["members"], list(da_x["member"].values))
+    ax = subset_time_series_by_year(da_x.sel(member=members), c["start_year"], c["end_year"])
+    ay = subset_time_series_by_year(da_y.sel(member=members), c["start_year"], c["end_year"])
+    xv, yv = ax.values, ay.values
+
+    candidate = np.isfinite(xv) & np.isfinite(yv)
+    if c["season_months"] is not None:
+        # A window spanning two seasons belongs to the season of its CLOSING day —
+        # the convention already used by the seasonal map pipeline.
+        candidate &= np.isin(ax["time"].dt.month.values, c["season_months"])[None, :]
+    exceed = candidate & ((xv / x_max + yv / y_max) >= c["threshold"])
+
+    years, k_ary = annual_exceedance_counts(candidate, exceed, ax["time"].dt.year.values)
+    starts, centres, counts = rolling_window_counts(
+        years, k_ary, c["roll_years"], c["roll_step"])
+    ens = ensemble_frequency_statistics(
+        starts, centres, counts, roll_years=c["roll_years"])
+
+    diag = {
+        "n_members":         len(members),
+        "n_ref_members":     n_ref_members,
+        "n_candidate_days":  int(candidate.sum()),
+        "n_exceedance_days": int(exceed.sum()),
+        "x_max": x_max, "y_max": y_max,
+        "physical_threshold": (f"{x_var}/{x_max:.4g} + {y_var}/{y_max:.4g} "
+                               f">= {c['threshold']:g}"),
+        "threshold_intercepts": (c["threshold"] * x_max, c["threshold"] * y_max),
+        "mean_sigma": float(ens["sigma"].mean()),
+        "mean_events_per_member_per_window": float(ens["mean_events_per_member"].mean()),
+    }
+    return {"config": c, "ensemble": ens, "diagnostics": diag}
+
+
+def print_frequency_evolution_summary(result: dict) -> None:
+    """Console summary — frozen maxima, physical threshold, counts, σ and S/N."""
+    c, d, e = result["config"], result["diagnostics"], result["ensemble"]
+    x_var, y_var = c["combo"]
+    print("=" * 78)
+    print(f"COMPOUND FREQUENCY EVOLUTION — {x_var} + {y_var} | {c['catchment']} | "
+          f"{c['window_days']}-day | {c['start_year']}–{c['end_year']} | "
+          f"season {c['season_tag']}")
+    print("=" * 78)
+    print(f"Frozen maxima (ref {c['norm_ref'][0]}–{c['norm_ref'][1]}, season "
+          f"{c['season_tag']}, {d['n_ref_members']} members): "
+          f"max {x_var} = {d['x_max']:.3f}, max {y_var} = {d['y_max']:.3f}")
+    print(f"Physical threshold: {d['physical_threshold']}  → intercepts "
+          f"({d['threshold_intercepts'][0]:.2f}, 0) and (0, {d['threshold_intercepts'][1]:.2f})")
+    print(f"Candidate days: {d['n_candidate_days']:,} | exceedance days (= events): "
+          f"{d['n_exceedance_days']:,}")
+    print(f"Windows: {len(e)} complete {c['roll_years']}-year windows, centres "
+          f"{e['window_centre'].iloc[0]:g}–{e['window_centre'].iloc[-1]:g} "
+          f"(step {c['roll_step']} yr)")
+    print(f"First window {e['window_centre'].iloc[0]:g}: {e['f_mean'].iloc[0]:.4g} events/year"
+          f"   |   last window {e['window_centre'].iloc[-1]:g}: "
+          f"{e['f_mean'].iloc[-1]:.4g} events/year")
+    print(f"Mean σ across members: {d['mean_sigma']:.4g} events/year")
+    print(f"S/N (ensemble mean / σ): range {e['signal_to_noise'].min():.2f} … "
+          f"{e['signal_to_noise'].max():.2f}   |   first window "
+          f"{e['signal_to_noise'].iloc[0]:.2f} → last window "
+          f"{e['signal_to_noise'].iloc[-1]:.2f}")
+    if d["mean_events_per_member_per_window"] < 5.0:
+        print(f"[warning] only {d['mean_events_per_member_per_window']:.1f} events per member "
+              f"per {c['roll_years']}-year window — σ across members is dominated by counting "
+              "noise. Lengthen FE_ROLL_YEARS before quoting σ quantitatively.")
+    print("=" * 78)
+
+
+def write_frequency_evolution_outputs(result: dict, stem: str, out_paths_fn) -> None:
+    """Write the ensemble CSV and a metadata JSON to every output root.
+
+    `stem`         : the figure stem, so the tables carry the same name
+    `out_paths_fn` : filename → list of paths (pass the notebook's `fe_figp`), so
+                     the tables land next to the PDFs.
+    """
+    c = result["config"]
+    meta = {k: (list(v) if isinstance(v, tuple) else v) for k, v in c.items()
+            if k != "cache_paths"}
+    meta.update({"cache_paths": [str(p) for p in c["cache_paths"]],
+                 "diagnostics": {k: (list(v) if isinstance(v, tuple) else v)
+                                 for k, v in result["diagnostics"].items()},
+                 "package_versions": {"numpy": np.__version__, "pandas": pd.__version__,
+                                      "xarray": xr.__version__},
+                 "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds")})
+
+    for fname, payload in ((f"{stem}_ensemble.csv", result["ensemble"]),
+                           (f"{stem}_metadata.json", meta)):
+        for p in out_paths_fn(fname):
+            p.parent.mkdir(parents=True, exist_ok=True)
+            (payload.to_csv(p, index=False) if fname.endswith(".csv")
+             else p.write_text(json.dumps(payload, indent=2, default=str)))
+            print(f"Saved → {p}")
+
 
 # ── SMILE ensemble aggregation ─────────────────────────────────────────────
 def pool_member_annual_maxima(member_annual_maxima: list[pd.Series]) -> pd.Series:
