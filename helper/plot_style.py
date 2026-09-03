@@ -73,26 +73,7 @@ PRECIP_DIV_CMAP = _load_ipcc_prec_div(_HELPER_DIR / "prec_div.txt")
 WEIGHT_CMAP = plt.get_cmap("viridis")
 
 # MODEL_* moved to config_paths.py to break the circular import with catchment_tools
-from config_paths import MODEL_COLORS, MODEL_LABELS, MODEL_ORDER  # noqa: E402
-
-# ── Diverging-norm helper ──────────────────────────────────────────────────────
-def _finite_max_abs(values: np.ndarray, fallback: float = 1.0) -> float:
-    """
-    Return max(|finite values|) of an array, or `fallback` if there are none.
-
-    Guards against ``np.nanmax`` raising
-    "zero-size array to reduction operation fmax which has no identity",
-    which happens when a difference field is entirely non-finite (e.g. two
-    grids do not share coordinates, or the reference field is all-zero so the
-    relative-difference denominator is all-NaN). In that degenerate case the
-    diverging colorbar simply falls back to a symmetric ±`fallback` range.
-    """
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return fallback
-    m = float(np.max(np.abs(finite)))
-    return m if m > 0 else fallback
-
+from config_paths import (MODEL_COLORS, MODEL_LABELS, MODEL_ORDER,rate_unit_label)  # noqa: E402
 
 # ── Diverging-norm helper ──────────────────────────────────────────────────────
 def _finite_max_abs(values: np.ndarray, fallback: float = 1.0) -> float:
@@ -961,6 +942,20 @@ JOINT_VAR_FORMULA_NAMES: dict[str, str] = {
 THRESHOLD_LINE_KW: dict = dict(color="0.15", linewidth=1.6, linestyle=(0, (7, 4)))
 
 
+# Point colour for a SEASON-restricted joint distribution. Colouring by day of
+# year is meaningless once the cloud has been pre-selected to a few months, so a
+# single neutral colour is used instead. A slate grey with a blue cast: light
+# enough that a dense overplotted core still reads as grey rather than black, so
+# the near-black dashed threshold line (THRESHOLD_LINE_KW, "0.15") stays clearly
+# distinguishable on top of it.
+JOINT_SEASON_POINT_COLOR = "#6B7C8C"
+JOINT_SEASON_POINT_ALPHA = 0.30   # slightly lower than the all-year alpha (0.35),
+                                  # because one colour overplots more visibly
+# Anchor of the absolute-threshold legend when NO month wheel is drawn — it moves
+# up into the space the wheel rect (0.815, 0.60, 0.13, 0.13) would have used.
+JOINT_NOWHEEL_LEGEND_ANCHOR: tuple = (0.88, 0.70)
+
+
 def add_month_color_wheel(fig, rect: tuple = (0.815, 0.60, 0.13, 0.13)) -> None:
     """Circular Jan–Dec day-of-year colour legend (paper-style wheel).
     January sits at the top; months run clockwise (Jan → Apr → Jul → Oct)."""
@@ -1023,7 +1018,10 @@ def add_absolute_threshold_legend(
     anchor : tuple
         (x, y) in FIGURE coordinates — top-centre of the legend block. The
         default sits directly below the month-wheel rect (0.815, 0.60, …), i.e.
-        the threshold entry always lands under the colour legend.
+        the threshold entry always lands under the colour legend. A
+        season-restricted figure draws no wheel and passes
+        `JOINT_NOWHEEL_LEGEND_ANCHOR` instead, so the entry moves up into the
+        space the wheel would have occupied.
 
     Returns
     -------
@@ -1057,7 +1055,10 @@ def make_joint_distribution_figure(
     threshold: float | None = None,
     x_norm_max: float | None = None,
     y_norm_max: float | None = None,
+    season_label: str | None = None,
+    single_season: bool = False,
 ) -> None:
+
     """
     Joint-distribution scatter of two catchment-averaged window quantities:
     one point per (member, date), coloured by day of year, with a circular
@@ -1076,7 +1077,22 @@ def make_joint_distribution_figure(
         given. Pass `x_max` / `y_max` from
         `catchment_tools.compound_threshold_stats()` so the drawn line and the
         printed exceedance statistics always use identical denominators.
+    season_label : str, optional
+        Season the points were restricted to, e.g. "Spring (MAMJ)" from
+        `catchment_tools.season_label()`. Appended to the grey selection note so
+        a season-restricted cloud can never be mistaken for the full record.
+        `None` (default) reproduces the all-months caption unchanged. The
+        restriction itself happens in the notebook via
+        `catchment_tools.subset_season()` — this function only labels it.
+    single_season : bool
+        `False` (default) — the ALL-YEAR figure: points are coloured by day of
+        year and the circular Jan–Dec month wheel is drawn, exactly as before.
+        `True` — the cloud is already pre-selected to one season, so a
+        day-of-year colour scale carries no information: every point is drawn in
+        the single neutral `JOINT_SEASON_POINT_COLOR` and the month wheel is
+        dropped. Pass `season_tag != "all"` from the notebook.
     """
+
     POINT_SIZE  = 3.0    # marker area — small because up to ~10^6 points are drawn
     POINT_ALPHA = 0.35   # transparency so point-cloud density stays visible
     SCATTER_DPI = 300    # raster resolution of the rasterized point layer in the PDF
@@ -1084,10 +1100,24 @@ def make_joint_distribution_figure(
     TITLE_PAD     = 18     # points of whitespace between title and axes
     AXIS_HEADROOM = 0.02   # fraction of the data range kept free above the maxima
 
+    RIGHT_WITH_LEGEND = 0.76   # right margin when the wheel and/or the threshold
+                               # legend has to fit beside the axes
+    RIGHT_PLAIN       = 0.95   # right margin when nothing sits beside the axes
+
+    # A season-restricted cloud gets ONE colour and no wheel: colouring by day of
+    # year would suggest a seasonal signal the pre-selection has already removed.
+    draw_wheel = not single_season
     fig, ax = plt.subplots(figsize=(7.6, 6.4))
-    fig.subplots_adjust(right=0.76)   # leave room for the month wheel
-    ax.scatter(x_vals, y_vals, c=doy_vals, cmap=DOY_CMAP, vmin=1, vmax=DOY_MAX,
-               s=POINT_SIZE, alpha=POINT_ALPHA, linewidths=0, rasterized=True)
+    fig.subplots_adjust(
+        right=RIGHT_WITH_LEGEND if (draw_wheel or threshold is not None)
+        else RIGHT_PLAIN)
+    if single_season:
+        ax.scatter(x_vals, y_vals, color=JOINT_SEASON_POINT_COLOR,
+                   s=POINT_SIZE, alpha=JOINT_SEASON_POINT_ALPHA,
+                   linewidths=0, rasterized=True)
+    else:
+        ax.scatter(x_vals, y_vals, c=doy_vals, cmap=DOY_CMAP, vmin=1, vmax=DOY_MAX,
+                   s=POINT_SIZE, alpha=POINT_ALPHA, linewidths=0, rasterized=True)
 
     # Open x-y axes instead of a full box; the point cloud starts exactly in
     # the bottom-left corner (no margin below the minima), headroom only above.
@@ -1104,7 +1134,12 @@ def make_joint_distribution_figure(
         f"Joint Distribution of {window_days}-Day {JOINT_VAR_TITLES[x_variable]} "
         f"and {window_days}-Day {JOINT_VAR_TITLES[y_variable]}, "
         f"{start_year}-{end_year}", fontsize=11, pad=TITLE_PAD)
-    ax.text(0.02, 0.98, f"{catchment_title} · CESM2-LE · {n_members} members",
+    # The season is appended to the grey selection note ONLY when one is set, so
+    # an all-months figure keeps exactly the caption it had before.
+    _note = f"{catchment_title} · CESM2-LE · {n_members} members"
+    if season_label:
+        _note += f" · {season_label}"
+    ax.text(0.02, 0.98, _note,
             transform=ax.transAxes, va="top", ha="left", fontsize=8, color="0.3")
     ax.grid(alpha=0.25, linewidth=0.4)
 
@@ -1120,9 +1155,14 @@ def make_joint_distribution_figure(
         x_line = np.array(ax.get_xlim())
         y_line = y_norm_max * (threshold - x_line / x_norm_max)
         ax.plot(x_line, y_line, zorder=5, **THRESHOLD_LINE_KW)
-        add_absolute_threshold_legend(fig, x_variable, y_variable, threshold)
+        # Without the wheel above it the legend moves up into that free space;
+        # with the wheel it keeps the function's own default anchor.
+        _leg_kw = {} if draw_wheel else dict(anchor=JOINT_NOWHEEL_LEGEND_ANCHOR)
+        add_absolute_threshold_legend(fig, x_variable, y_variable, threshold, **_leg_kw)
 
-    add_month_color_wheel(fig)
+    if draw_wheel:
+        add_month_color_wheel(fig)
+
 
     for out_path in out_paths:
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1142,12 +1182,38 @@ COMPOUND_VAR_DISPLAY_NAMES: dict[str, str] = {
     "snowmelt":      "Snowmelt",
     "soil_moisture": "Soil Moisture",
 }
-FREQ_AXIS_LABEL  = "Compound Extremes (events per year)"   # Figure 1 y-axis
+# Figure-1 y-axis. The unit is season-aware, so it is built from ONE definition
+# (config_paths.rate_unit_label) instead of a hardcoded "events per year" string.
+FREQ_AXIS_TEMPLATE = "Compound Extremes ({unit})"          # Figure 1 y-axis
 SN_AXIS_LABEL    = "Signal-to-noise-ratio (unitless)"      # Figure 2 y-axis
-FREQ_MAIN_COLOR  = MODEL_COLORS["cesm2_le"]   # ensemble-mean / pooled line
-FREQ_BAND_COLOR  = "#BBD7EA"                  # ±1σ band, lighter than the mean
+FREQ_MAIN_COLOR  = MODEL_COLORS["cesm2_le"]   # ensemble-mean line (Fig. 1) / S/N line (Fig. 2)
+FREQ_BAND_COLOR  = "#BBD7EA"                  # p25–p75 (IQR) band, lighter than the mean line
 FREQ_ENV_COLOR   = "0.55"                     # ensemble-spread envelope, deliberately subordinate
 FREQ_FIG_DPI     = 300                        # rasterised content in the saved PDF
+
+# Legend wording per spread_method — the label always names which flavour of
+# percentile is on screen, so an empirical and a grouped figure can never be
+# confused. There are exactly two methods; no other central/spread scheme exists.
+FREQ_BAND_LABELS: dict[str, str] = {
+    "percentile_empirical": "Interquartile range (25th–75th percentile, empirical)",
+    "percentile_grouped":   "Interquartile range (25th–75th percentile, grouped)",
+}
+FREQ_ENV_LABELS: dict[str, str] = {
+    "percentile_empirical": "Ensemble spread (2.5/97.5-%, empirical)",
+    "percentile_grouped":   "Ensemble spread (2.5/97.5-%, grouped)",
+}
+
+
+def freq_axis_label(season_months=None) -> str:
+    """Figure-1 y-axis label for a month selection — season-aware unit.
+
+    `season_months` is `config["season_months"]` (`None` = all months). All 12
+    months give 'Compound Extremes (events per year)', any subset gives
+    'Compound Extremes (events per season)'. Only the LABEL changes — each year
+    contributes exactly one season, so the plotted values are identical.
+    """
+    return FREQ_AXIS_TEMPLATE.format(unit=rate_unit_label(season_months))
+
 
 FREQ_FIGSIZE    = (9.2, 7.0)   # wide enough for the two-column legend block
 FREQ_AXES_BOX   = dict(left=0.095, right=0.975, top=0.905, bottom=0.345)
@@ -1181,12 +1247,15 @@ def frequency_selection_lines(*, x_variable: str, y_variable: str, threshold: fl
     return lines + list(extra)
 
 
-def _frequency_figure(fig_title: str, y_label: str = FREQ_AXIS_LABEL):
+def _frequency_figure(fig_title: str, y_label: str | None = None):
     """Shared axes skeleton for both frequency-evolution figures.
 
-    `y_label` defaults to the events-per-year label of Figure 1; Figure 2 passes
-    `SN_AXIS_LABEL`, so the geometry stays in ONE place for both.
+    `y_label` defaults to the all-months Figure-1 label; Figure 1 always passes
+    `freq_axis_label(season_months)` and Figure 2 passes `SN_AXIS_LABEL`, so the
+    geometry stays in ONE place for both.
     """
+    y_label = freq_axis_label() if y_label is None else y_label
+
     fig, ax = plt.subplots(figsize=FREQ_FIGSIZE)
     fig.subplots_adjust(**FREQ_AXES_BOX)
     ax.set_title(fig_title, fontsize=11.5, pad=14)
@@ -1221,7 +1290,8 @@ def _finish_frequency_figure(fig, handles: list, labels: list, selection_lines: 
 def plot_internal_variability_trend(
     window_centres: np.ndarray,
     f_mean: np.ndarray,
-    sigma: np.ndarray,
+    band_lo: np.ndarray,
+    band_hi: np.ndarray,
     f_min: np.ndarray,
     f_max: np.ndarray,
     *,
@@ -1233,40 +1303,69 @@ def plot_internal_variability_trend(
     roll_years: int,
     selection_lines: list,
     out_paths: list,
-    spread_show: tuple = ("std", "minmax"),
+    spread_show: tuple = ("iqr", "p025p975"),
+    spread_method: str = "percentile_grouped",
     p025: np.ndarray | None = None,
     p975: np.ndarray | None = None,
+    season_months: list[int] | None = None,
 ) -> None:
     """
     Figure 1 — compound-extreme hazard frequency and its internal variability.
 
-    The ensemble-mean rate (events per year) is ALWAYS drawn. `spread_show`
-    adds, independently:
-      'std'      → the blue ±1 standard-deviation band across members,
+    The ensemble-MEAN rate is ALWAYS the central line — never the median. Its
+    resolution is 1/(M·L) where every rank statistic across members is locked to
+    1/L, and it is the same quantity Figure 2 divides by sigma, so both figures
+    show one central quantity. `spread_show` adds, independently:
+      'iqr'      → the blue 25th–75th-percentile band across members, i.e. the
+                   box of a classic box plot,
       'minmax'   → the dashed lowest/highest-member envelope,
-      'p025p975' → the dashed 2.5/97.5-percentile envelope across members.
+      'p025p975' → the dotted 2.5/97.5-percentile envelope across members.
     'minmax' and 'p025p975' share one dashed style, so exactly one of them may be
     selected (enforced in catchment_tools.validate_frequency_evolution_config).
     All statistics come from catchment_tools; this only draws them.
-    """
-    SIGMA_ARROW_LW = 1.1    # width of the ±1σ magnitude arrow at the sample window
-    Y_HEADROOM     = 1.12   # top of the y-axis as a multiple of the highest envelope
 
-    x  = np.asarray(window_centres, float)
-    fm = np.asarray(f_mean, float)
-    sd = np.asarray(sigma, float)
+    Parameters
+    ----------
+    f_mean : per-window ensemble MEAN — the `f_mean` column of
+             `ensemble_frequency_statistics`.
+    band_lo, band_hi : the p25/p75 band. WHICH columns these are follows
+             `spread_method`; look them up with
+             `catchment_tools.frequency_spread_columns(spread_method)` so the
+             mapping lives in one place.
+    f_min, f_max : lowest/highest-member envelope ('minmax').
+    p025, p975   : the 2.5/97.5-percentile envelope ('p025p975'), again in the
+             flavour `spread_method` selects.
+    spread_method : 'percentile_empirical' (np.percentile — the reference
+             version, whose values are locked to multiples of the rate quantum
+             1/L) | 'percentile_grouped' (default — interpolated through the tied
+             blocks, which removes that 1/L staircase). These are the ONLY two
+             options; only the legend wording and the source columns change, the
+             mean line and sigma are identical either way.
+    season_months : `config["season_months"]` — decides whether the y-axis unit
+             reads 'events per year' or 'events per season'.
+    """
+    IQR_ARROW_LW = 1.1    # width of the IQR magnitude arrow at the sample window
+    Y_HEADROOM   = 1.12   # top of the y-axis as a multiple of the highest envelope
+
+    x   = np.asarray(window_centres, float)
+    fmn = np.asarray(f_mean, float)
+    q25 = np.asarray(band_lo, float)
+    q75 = np.asarray(band_hi, float)
     fig, ax = _frequency_figure(
         f"Compound ({COMPOUND_VAR_DISPLAY_NAMES[x_variable]} and "
         f"{COMPOUND_VAR_DISPLAY_NAMES[y_variable]}) Hazard Frequency "
-        f"for {catchment_title} from {start_year}-{end_year}")
+        f"for {catchment_title} from {start_year}-{end_year}",
+        y_label=freq_axis_label(season_months))
 
-    handles, labels, upper = [], [], [np.nanmax(fm)]
-    if "std" in spread_show:
-        ax.fill_between(x, fm - sd, fm + sd, color=FREQ_BAND_COLOR, alpha=0.75,
+    handles, labels, upper = [], [], [np.nanmax(fmn)]
+    if "iqr" in spread_show:
+        # Interquartile range across members — asymmetric around the central line
+        # by construction, unlike the ±1σ band it replaces.
+        ax.fill_between(x, q25, q75, color=FREQ_BAND_COLOR, alpha=0.75,
                         linewidth=0, zorder=2)
         handles.append(Patch(facecolor=FREQ_BAND_COLOR, edgecolor="none"))
-        labels.append("± 1 standard deviation")
-        upper.append(np.nanmax(fm + sd))
+        labels.append(FREQ_BAND_LABELS[spread_method])
+        upper.append(np.nanmax(q75))
 
     if "minmax" in spread_show:
         ax.plot(x, f_min, color=FREQ_ENV_COLOR, lw=0.8, ls=(0, (1, 1.8)), zorder=3)
@@ -1279,26 +1378,27 @@ def plot_internal_variability_trend(
         ax.plot(x, p025, color=FREQ_ENV_COLOR, lw=0.9, ls=(0, (1, 2)), zorder=3)
         ax.plot(x, p975, color=FREQ_ENV_COLOR, lw=0.9, ls=(0, (1, 2)), zorder=3)
         handles.append(Line2D([], [], color=FREQ_ENV_COLOR, lw=0.9, ls=(0, (1, 2))))
-        labels.append("Ensemble spread (2.5/97.5-%)")
+        labels.append(FREQ_ENV_LABELS[spread_method])
         upper.append(np.nanmax(p975))
 
-    ax.plot(x, fm, color=FREQ_MAIN_COLOR, lw=2.2, zorder=5)
+
+    ax.plot(x, fmn, color=FREQ_MAIN_COLOR, lw=2.2, zorder=5)
     handles.insert(0, Line2D([], [], color=FREQ_MAIN_COLOR, lw=2.2))
     labels.insert(0, "Ensemble mean")
 
     ax.set_xlim(x.min(), x.max())
     ax.set_ylim(0.0, float(np.nanmax(upper)) * Y_HEADROOM)
 
-    if "std" in spread_show:
-        # σ-magnitude arrow at the central window — the quantity the figure is about.
-        # Clipped at the axis floor: for rare events fm − σ is negative, and an
-        # unclipped arrow would run out of the axes and through the x-label.
+    if "iqr" in spread_show:
+        # IQR-magnitude arrow at the central window — the spread measure the
+        # figure is about. Clipped at the axis floor: for rare events p25 sits at
+        # 0 and an unclipped arrow would run through the x-label.
         i = len(x) // 2
-        y_lo = max(fm[i] - sd[i], ax.get_ylim()[0])
-        ax.annotate("", xy=(x[i], fm[i] + sd[i]), xytext=(x[i], y_lo),
-                    arrowprops=dict(arrowstyle="<->", lw=SIGMA_ARROW_LW, color="0.2"),
+        y_lo = max(q25[i], ax.get_ylim()[0])
+        ax.annotate("", xy=(x[i], q75[i]), xytext=(x[i], y_lo),
+                    arrowprops=dict(arrowstyle="<->", lw=IQR_ARROW_LW, color="0.2"),
                     zorder=7)
-        ax.text(x[i] + 0.01 * (x.max() - x.min()), fm[i] + sd[i], r"$\pm\,1\sigma$",
+        ax.text(x[i] + 0.01 * (x.max() - x.min()), q75[i], "IQR",
                 ha="left", va="bottom", fontsize=8.5, color="0.2", zorder=7)
 
     _finish_frequency_figure(fig, handles, labels, selection_lines, out_paths)
@@ -1319,11 +1419,13 @@ def plot_signal_to_noise_ratio(
     """
     Figure 2 — signal-to-noise ratio of the compound-extreme rate, per window.
 
-    S/N = ensemble mean / standard deviation ACROSS MEMBERS, unitless, computed
-    in catchment_tools.ensemble_frequency_statistics — this only draws it. Same
-    threshold, N-day window, member pool, frozen reference and season as
-    Figure 1 (it reads the same `ensemble` table), so both figures describe
-    exactly the same events and share the same legend block.
+    S/N = ensemble MEAN / standard deviation ACROSS MEMBERS, unitless, computed
+    in catchment_tools.ensemble_frequency_statistics — this only draws it. The
+    numerator is the same mean line Figure 1 shows, so both figures rest on ONE
+    central quantity (the mean, resolution 1/(M·L), rather than a rank statistic
+    locked to 1/L). Same threshold, N-day window, member pool, frozen reference
+    and season as Figure 1 (it reads the same `ensemble` table), so both figures
+    describe exactly the same events and share the same legend block.
     """
     Y_HEADROOM = 1.12   # top of the y-axis as a multiple of the highest value
 

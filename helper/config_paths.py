@@ -366,6 +366,38 @@ SEASON_MONTHS: dict[str, list[int]] = {
 }
 
 
+# ── Compound-extreme rate unit (season-aware) ─────────────────────────────────
+def rate_unit_label(months=None) -> str:
+    """Return 'events per year' or 'events per season' for a month selection.
+
+    ONE definition of the unit string of the compound-extreme rate, shared by the
+    Figure-1 y-axis, the console summary and the CSV/JSON metadata, so a
+    season-restricted run can never be labelled 'per year' in one place and
+    'per season' in another.
+
+    Parameters
+    ----------
+    months : None | iterable of int
+        Month numbers the count was restricted to — pass
+        `config["season_months"]` from
+        `catchment_tools.validate_frequency_evolution_config` (`None` = all
+        months). Any selection of fewer than 12 distinct months is a season.
+
+    Returns
+    -------
+    str
+        'events per year' when all 12 calendar months are selected,
+        'events per season' otherwise. Only the LABEL changes — the VALUE is
+        identical either way, because each year contributes exactly one season
+        to the count. The rate stays per year / per season (never per decade), so
+        it remains comparable when the rolling-window length L changes.
+    """
+    if months is None:
+        return "events per year"
+    return ("events per year" if len({int(m) for m in months}) == 12
+            else "events per season")
+
+
 # ── Seasonal analysis cache paths ─────────────────────────────────────────────
 def era5_interp_window_seasonal_median_cache_path(window_days: int, season: str, start_year: int, end_year: int) -> Path:
     """Cache for ERA5-interpolated seasonal N-day median [lat, lon]."""

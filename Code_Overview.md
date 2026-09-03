@@ -1,429 +1,757 @@
-# Code Overview — Storm Hans Precipitation & Climate-Model Evaluation
+# Code Overview
 
-Last updated after refactoring: 27. May 2026
-
----
-
-## Helper Python files (`helper/`)
-
----
-
-### `config_paths.py` — paths and constants only
-
-No plotting, no data loading, no statistical logic. Everything else imports from here.
-
-| Name | Kind | Purpose |
-|---|---|---|
-| `ERA5_RAW_DIR` | constant | Raw ERA5 annual NetCDF files |
-| `SENORGE_RAW_DIR` | constant | Raw seNorge annual NetCDF files |
-| `ERA5_INTERPOLATED_BASE` | constant | Root dir for ERA5 interpolated to CESM2-LE grid (`/scandinavia/`) |
-| `ERA5_INTERPOLATED_DIR` | constant | ERA5 interpolated precipitation sub-path (`BASE / "tp"`) |
-| `ERA5_INTERPOLATED_SWE_DIR` | constant | ERA5 interpolated SWE sub-path (`BASE / "sd"`) |
-| `CESM2_LE_BASE` | constant | Root dir for CESM2-LE scandinavia data |
-| `CESM2_LE_DIR` | constant | CESM2-LE precipitation sub-path (`BASE / "tp24"`) |
-| `CESM2_LE_DIR` | constant | CESM2-LE precipitation sub-path (`BASE / "PRECT"`; variable `PRECT`, mm/day — identical values to the retired `tp24` folder) |
-| `CESM2_LE_SM_DIR` | constant | CESM2-LE soil-moisture sub-path (`BASE / "SM"`) |
-| `ERA5_INTERPOLATED_SWVL_DIR` | constant | ERA5 interpolated soil-moisture sub-path (`BASE / "swvl"`) |
-| `field_daily_cache_path(model, kind, start, end, member_id=None, window_days=1)` | function | Per-member (CESM2-LE) / overall (ERA5-interp) daily SWE/soil-moisture cache path. `window_days=1` → raw `…_1day_…`; `window_days>=2` → pre-computed N-day snowmelt cache `…_{N}day_…` (SWE only, max(0,−ΔSWE): positive melt, gains→0) |
-| `field_window_cache_path(model, kind, which, start, end, season="")` | function | Derived N-day median/p90 cache path (global or per-member; optional season) for SWE/soil moisture |
-| `GFDL_SPEAR_DIR` | constant | GFDL-SPEAR raw data |
-| `FIGURES_DIR`, `FIGURES_DIR_SECONDARY` | constant | Two output roots for all figures |
-| `POSTPROC_DIR`, `WEIGHTS_DIR` | constant | Postprocessed cache and weight files |
-| `OVERALL_PRECIP_EXTENT` | constant | (W, E, S, N) crop for all spatial caches |
-| `SMILE_CONFIG` | dict | Per-model metadata: dir, n_members, unit_mode, ref_dataset |
-| `CATCHMENTS` | dict | slug → human title for the 5 study catchments |
-| `COMPOUND_CATCHMENTS` | dict | slug → title for the compound joint-distribution catchments (`regine_drammen`, `regine_glomma`, `regine_drammen_glomma` = dissolved union; kept separate from `CATCHMENTS` so main loops are unchanged) |
-| `HANS_DATE`, `HANS_SEARCH_YEAR` | constant | Storm Hans event reference |
-| `GEOJSON_FILES` | dict | slug → GeoJSON filename (single canonical definition) |
-| `MODEL_COLORS`, `MODEL_LABELS`, `MODEL_ORDER` | dict/list | Consistent colours/labels/order across all evaluation figures. Defined here to avoid a circular import between `catchment_tools` and `plot_style`. |
-| `res_tag(dataset, resolution)` | function | Filesystem-safe `era5_0.5x0.5` style tag |
-| `acc_tag(window_days)` | function | `"1day"` / `"2day"` / `"3day"` … filename label |
-| *(N-day path builders)* | note | All renamed figure-path / cache-path builders (`median_precip_*`, `p90_precip_*`, `*_seasonal_*`, `cesm2_window_*`, `era5_interp_window_*`, `field_window_cache_path`) take a `window_days` argument and embed `acc_tag(window_days)` in the filename (e.g. `3daymedian_…`). For `window_days=2` the filenames are identical to the legacy `2day` names, so existing caches/figures remain valid. |
-| `postproc_dir(dataset)` | function | Dataset subdirectory for grid-level caches |
-| `catchment_postproc_path(...)` | function | Full path for a catchment-averaged NetCDF cache |
-| `figure_paths(...)` | function | Both figure-root paths for `timeseries_return_hans` PDFs |
-| `smile_member_postproc_path(...)` | function | SMILE per-member catchment cache path |
-| `smile_yearmax_stats_path(...)` | function | SMILE pooled annual-max stats cache path |
-| `cesm2_catchment_field_path(window_days, slug, variable, start, end)` | function | Catchment-averaged CESM2-LE compound-series cache — ONE file per (window, catchment, variable) with ALL common members `[member, time]`; variable ∈ {precipitation, soil_moisture, snowmelt} |
-| `smile_figure_paths(...)` | function | Both figure-root paths for SMILE return-period PDFs |
-| `overall_precip_path(dataset, resolution, start, end)` | function | Spatial daily-precip cache path (ERA5 / seNorge) |
-| `overall_precip_member_path(dataset, member_id, start, end)` | function | Spatial daily-precip cache path (one SMILE member) |
-| `precip_map_figure_paths(fig_subdir, fname)` | function | Both figure-root paths for any precipitation map PDF |
-| `annmedian_precip_paths(fig_subdir, start, end)` | function | Paths for the 4-panel annual median map |
-| `median_precip_paths(fig_subdir, start, end)` | function | Paths for 2-panel N-day median figure (CESM2-LE vs ERA5 0.5°) — `median_precip_*.pdf` |
-| `median_precip_diff_paths(...)` | function | Paths for 3-panel N-day median diff (CESM2-LE vs ERA5-interp) — `median_precip_diff_*.pdf` |
-| `median_precip_diffonly_paths(...)` | function | Paths for single-panel N-day median diff — `median_precip_diffonly_*.pdf` |
-| `median_precip_sig_diff_paths(fig_subdir, start, end, pctl_tag)` | function | Paths for significance-hatched 3-panel N-day median diff — `median_precip_{pctl_tag}_diff_*.pdf` |
-| `p90_precip_diff_paths(...)` | function | Paths for 3-panel 90th-pctile N-day diff — `median_90pctl_precip_diff_*.pdf` |
-| `p90_precip_diffonly_paths(...)` | function | Paths for single-panel 90th-pctile diff — `median_90pctl_precip_diffonly_*.pdf` |
-| `p90_precip_sig_diff_paths(fig_subdir, start, end, pctl_tag)` | function | Paths for significance-hatched 3-panel 90th-pctile diff — `median_90pctl_precip_{pctl_tag}_diff_*.pdf` |
-| `era5_interp_window_median_cache_path(start, end)` | function | ERA5-interpolated N-day median cache |
-| `era5_interp_window_p90_cache_path(start, end)` | function | ERA5-interpolated N-day 90th-pctile cache |
-| `cesm2_annmedian_cache_path(start, end)` | function | CESM2-LE 100-member annual-median cache |
-| `cesm2_window_annmedian_cache_path(window_days, start, end)` | function | CESM2-LE 100-member N-day-median cache |
-| `cesm2_window_p90_cache_path(start, end)` | function | CESM2-LE 100-member N-day 90th-pct cache (global p90 reused by `compute_cesm2_le_window_per_member_p90_2d`) |
-| `cesm2_window_global_median_cache_path(start, end)` | function | Cache path for the CESM2-LE true global N-day median (all members × time) |
-| `cesm2_window_per_member_medians_cache_path(start, end)` | function | Cache path for stacked per-member N-day medians `[n_members, lat, lon]` |
-| `cesm2_window_per_member_p90_cache_path(start, end)` | function | Cache path for stacked per-member N-day 90th-pctile fields `[n_members, lat, lon]` |
-| `SEASONS_ORDER` | constant | `["DJF", "MAM", "JJA", "SON"]` — the four standard seasons only; drives the 4×3 seasonal figure and the diagnostic loops, both of which require exactly 4 entries. Custom windows must NOT be added here |
-| `SEASON_LABELS` | constant | Season key → plot label, e.g. `"MAM"` → `"Spring (MAM)"`, `"MAMJ"` → `"Spring (MAMJ)"` |
-| `SEASON_MONTHS` | constant | Season key → month numbers; **single source of truth**, imported by `data_era5._SEASON_MONTHS` and `data_smile._SEASON_MONTHS`. Includes the custom 4-month window `"MAMJ"` → `[3, 4, 5, 6]`. Add new windows here only |
-| `era5_interp_window_seasonal_median_cache_path(season, start, end)` | function | Cache for ERA5-interp seasonal N-day median |
-| `era5_interp_window_seasonal_p90_cache_path(season, start, end)` | function | Cache for ERA5-interp seasonal N-day 90th-pctile |
-| `cesm2_window_seasonal_global_median_cache_path(season, start, end)` | function | Cache for CESM2-LE seasonal global median `[lat, lon]` |
-| `cesm2_window_seasonal_per_member_medians_cache_path(season, start, end)` | function | Cache for CESM2-LE per-member seasonal medians `[n_members, lat, lon]` |
-| `cesm2_window_seasonal_global_p90_cache_path(season, start, end)` | function | Cache for CESM2-LE seasonal global 90th-pctile `[lat, lon]` |
-| `cesm2_window_seasonal_per_member_p90_cache_path(season, start, end)` | function | Cache for CESM2-LE per-member seasonal 90th-pctile `[n_members, lat, lon]` |
-| `median_seasonal_precip_sig_diff_paths(fig_subdir, start, end, pctl_tag)` | function | Paths for 4×3 seasonal significance-hatched N-day median diff — `{N}daymedian_seasonal_precip_{pctl_tag}_diff_*.pdf` |
-| `p90_seasonal_precip_sig_diff_paths(fig_subdir, start, end, pctl_tag)` | function | Paths for 4×3 seasonal significance-hatched 90th-pctile diff — `{N}daymedian_seasonal_90pctl_precip_{pctl_tag}_diff_*.pdf` |
-| `p90_single_season_precip_sig_diff_paths(fig_subdir, window_days, season, start, end, pctl_tag)` | function | Paths for the 3-panel **single-season** significance-hatched 90th-pctile diff — `{N}daymedian_{season}_90pctl_precip_{pctl_tag}_diff_*.pdf`; same 1×3 layout as the annual figure, `pctl_tag` must keep the `{lo}_{hi}pctl` form so `plot_window_interp_3panel` selects the identical colorbar offset |
-| `COMPOUND_FREQ_FIG_SUBDIR` | constant | `"compound_flood_risk_output/frequency_evolution"` — output sub-folder for the two rolling-window compound figures and their CSV/JSON |
-| `compound_freq_figure_paths(fname)` | function | Both figure roots for one frequency-evolution output (PDF, CSV or JSON); thin wrapper over `precip_map_figure_paths` so the sub-folder is defined here and only referenced from the notebook |
-| `compound_freq_stem(figtype, window_days, x_variable, y_variable, slug, start, end, roll_years, threshold, norm_ref, season, members)` | function | Shared filename stem for the frequency-evolution figures and data outputs — `internal_variability_trend` / `signal_to_noise`; the threshold keeps its decimal point (`thr0.8`, `thr1.0`) and is followed by `_ref{start}-{end}` (the frozen reference window fixes the threshold line, so it must appear in the name), `_{season}` and `_members{spec}` are appended only when they differ from the defaults |
-
----
-
-### `data_era5.py` — ERA5 file discovery, loading, and spatial-cache builders
-
-| Name | Kind | Purpose |
-|---|---|---|
-| `find_era5_files(era5_dir, resolution)` | function | Sorted list of all ERA5 annual files for a resolution |
-| `get_year_range(files, resolution)` | function | `(start_year, end_year)` from a file list |
-| `day_start(timestamp)` | function | Normalise a timestamp to midnight |
-| `select_time_range_by_day(da, start, end)` | function | Day-level time selection (robust to sub-daily timestamps) |
-| `select_single_time_by_day(da, day)` | function | Select one day from a DataArray |
-| `coord_slice(coord, lo, hi)` | function | `slice()` that works for both ascending and descending axes |
-| `pick_year_file(files, year)` | function | Return the single ERA5 file covering a given year |
-| `save_era5_overall(resolution, era5_dir, out_path_fn, extent, force)` | function | Build and save the full-period spatially-cropped ERA5 daily cache |
-| `compute_era5_annual_median_2d(resolution, start, end, era5_dir, cache_path_fn, open_cache_fn)` | function | Annual median map from ERA5 overall cache |
-| `compute_era5_window_median_2d(resolution, start, end, ...)` | function | N-day rolling median map from ERA5 overall cache |
-| `find_era5_interpolated_files(era5_interp_dir)` | function | Sorted list of ERA5-interpolated-to-CESM2-LE annual files; variable prefix matched generically (`tp`/`sd`/`swvl`) so one function serves precip, SWE and soil moisture |
-| `get_year_range_era5_interp(files)` | function | `(start_year, end_year)` from ERA5-interpolated file list |
-| `save_era5_interpolated_field_overall(era5_interp_dir, out_path_fn, variable, cache_var, units, extent, force)` | function | Build/save ERA5-interpolated daily SWE (`sd`) / soil-moisture (`swvl`) cache; no metre→mm conversion |
-| `save_era5_interpolated_field_diff_overall(era5_interp_dir, in_path_fn, out_path_fn, cache_var, diff_fn, open_cache_fn, window_days, units, force)` | function | Build the ERA5-interp daily N-day snowmelt cache from the 1-day cache via `diff_fn` (max(0,−ΔSWE): positive melt, gains→0) over the full record |
-| `compute_era5_interpolated_window_median_2d(start, end, ...)` | function | N-day rolling median from ERA5-interpolated cache |
-| `compute_era5_interpolated_window_p90_2d(start, end, ..., p90_cache_path, ...)` | function | 90th percentile of N-day rolling sums from ERA5-interpolated; caches result; reads cache by trying both `twoday_p90_precip` and legacy `twodayp90_precip` variable names |
-| `_SEASON_MONTHS` | constant | Alias of `cfg.SEASON_MONTHS` (no longer a private copy) — any season key added to `config_paths.py` is available to `_filter_season_da` automatically |
-| `_filter_season_da(da, season)` | function | Select time steps in a DataArray whose month belongs to the given season |
-| `compute_era5_interpolated_window_seasonal_median_2d(season, start, end, ...)` | function | Seasonal median of N-day rolling sums from ERA5-interpolated cache; caches result |
-| `compute_era5_interpolated_window_seasonal_p90_2d(season, start, end, ...)` | function | Seasonal 90th percentile of N-day rolling sums from ERA5-interpolated cache; caches result |
+This is a reference for the modules in `helper/` and a cell-level reference for the
+notebooks in `code/`. For the description of *what* the analysis does and in which order
+things have to be run, see  the `README.md`.
 
 
 ---
 
-### `data_senorge.py` — seNorge file discovery, loading, and spatial-cache builders
+## 1. `helper/config_paths.py`
 
-| Name | Kind | Purpose |
-|---|---|---|
-| `find_senorge_files(senorge_dir)` | function | Sorted list of all seNorge annual files |
-| `get_year_range_senorge(files)` | function | `(start_year, end_year)` from a file list |
-| `load_senorge_precipitation(files, ...)` | function | Open and mask seNorge `rr` variable |
-| `latlon_extent_to_utm_bbox(extent)` | function | Convert (W, E, S, N) degrees to UTM-33 bounding box in metres |
-| `save_senorge_overall(senorge_dir, out_path_fn, extent, force)` | function | Build and save the full-period spatially-cropped seNorge daily cache |
-| `compute_senorge_annual_median_2d(start, end, senorge_dir, cache_path_fn, open_cache_fn)` | function | Annual median map from seNorge overall cache |
-| `compute_senorge_2day_median_2d(start, end, ...)` | function | 2-day rolling median map from seNorge overall cache |
+Paths and constants are here, no plotting, data loading
 
----
+### 1.1 Raw-data directories
 
-### `data_smile.py` — SMILE model file discovery, loading, and spatial-cache builders
+- `ERA5_RAW_DIR` — raw ERA5 annual NetCDF files (`tp24`)
+- `SENORGE_RAW_DIR` — raw seNorge annual NetCDF files (`rr`)
+- `ERA5_INTERPOLATED_BASE` — ERA5 regridded onto the CESM2-LE grid; sub-paths
+  `ERA5_INTERPOLATED_DIR` (`tp`), `ERA5_INTERPOLATED_SWE_DIR` (`sd`),
+  `ERA5_INTERPOLATED_SWVL_DIR` (`swvl`)
+- `CESM2_LE_BASE` with sub-paths `CESM2_LE_DIR` (`PRECT`, mm/day), `CESM2_LE_SWE_DIR` (`SWE`),
+  `CESM2_LE_SM_DIR` (`SM`)
+- `GFDL_SPEAR_DIR` — GFDL-SPEAR-MED-LE precipitation
+- `CATCHMENT_RAW_DIR` / `GEOJSON_DIR` — NVE catchment GeoJSONs and the legacy weight files
 
-Supports `cesm2_le` and `gfdl_spear_med_le`.
+### 1.2 Output directories
 
-| Name | Kind | Purpose |
-|---|---|---|
-| `find_smile_members(model_dir, dataset)` | function | Sorted list of unique member IDs; for cesm2_le the variable token (PRECT/SWE/SM) is matched generically and a mixed-variable directory raises an error |
-| `find_smile_files_for_member(model_dir, dataset, member_id, ...)` | function | Chronological file list for one ensemble member |
-| `_convert_smile_tp24_to_mm(da, unit_mode)` | function | m→mm conversion with auto-detection from metadata |
-| `load_smile_precipitation(files, start, end, unit_mode)` | function | Open, convert (PRECT or tp24 → mm), deduplicate, sort one member's precipitation |
-| `get_year_range_smile(model_dir, dataset)` | function | Full `(start_year, end_year)` available on disk |
-| `load_cesm2_le_field(files, variable, start, end)` | function | Open/concatenate a CESM2-LE state variable (`SWE`/`SM`), no unit conversion; same sort/dedup robustness as `load_smile_precipitation` |
-| `save_cesm2_le_field_overall(model_dir, out_path_fn, variable, cache_var, units, force)` | function | Build per-member daily SWE/soil-moisture caches (counterpart of `save_smile_overall`, kg/m²) |
-| `save_cesm2_le_field_diff_overall(model_dir, in_path_fn, out_path_fn, cache_var, diff_fn, open_cache_fn, window_days, units, force)` | function | Build per-member CESM2-LE daily N-day snowmelt caches from the 1-day caches via `diff_fn` (max(0,−ΔSWE): positive melt, gains→0) over the full record |
-| `compute_cesm2_le_annual_median_2d(start, end, model_dir, member_cache_path_fn, median_cache_path, open_cache_fn, ...)` | function | True pooled median annual map: pools all n\_members × n\_years annual totals per pixel then takes `np.nanmedian`; caches result |
-| `compute_cesm2_le_window_median_2d(start, end, ..., rolling_fn, subset_fn, ...)` | function | 100-member median N-day rolling map; caches result |
-| `compute_cesm2_le_window_p90_2d(start, end, ..., p90_cache_path, rolling_fn, subset_fn, ...)` | function | 100-member median of per-member 90th-pctile N-day sums; caches result; reads cache by trying both `twoday_p90_precip` and legacy `twodayp90_precip` variable names |
-| `compute_cesm2_le_window_global_median_2d(start, end, model_dir, ..., global_median_cache_path, per_member_medians_cache_path, ...)` | function | True global median of N-day rolling sums (all members × time) per pixel; simultaneously saves per-member medians `[n_members, lat, lon]` for significance testing |
-| `compute_cesm2_le_window_per_member_p90_2d(start, end, model_dir, ..., per_member_p90_cache_path, global_p90_cache_path, ...)` | function | Per-member 90th-pctile N-day fields `[n_members, lat, lon]` plus global p90; saves two caches |
-| `compute_significance_masks(da_era5, per_member_da, lower_pctl, upper_pctl)` | function | Direct percentile-rank significance test (no FDR): marks a pixel significant if `n_greater >= round(upper_pctl/100 * n_members)` (ERA5 ≤ lower pctile → `sig_cesm_higher`) or `n_less >= threshold` (ERA5 ≥ upper pctile → `sig_era5_higher`); NaN pixels set to False; returns `(sig_cesm_higher, sig_era5_higher)` bool arrays |
-| `_SEASON_MONTHS` | constant | Alias of `cfg.SEASON_MONTHS` (no longer a private copy) — any season key added to `config_paths.py` is available to `_season_time_mask` automatically |
-| `_season_time_mask(time_values, season)` | Returns boolean mask selecting timesteps in the given season's months; handles both `numpy.datetime64` and `cftime.DatetimeNoLeap` time axes | private helper |
-| `compute_cesm2_le_window_seasonal_global_median_2d(season, start, end, ...)` | function | Seasonal true global median + per-member medians of N-day rolling sums; saves two caches |
-| `compute_cesm2_le_window_seasonal_per_member_p90_2d(season, start, end, ...)` | function | Seasonal per-member 90th-pctile fields + global 90th-pctile; saves two caches |
+- `FIGURES_DIR`, `FIGURES_DIR_SECONDARY` — every figure is written to both
+- `POSTPROC_DIR`, `WEIGHTS_DIR` — postprocessed caches and catchment weight files
+- `OVERALL_PRECIP_EXTENT` — `(W, E, S, N)` crop applied to all spatial caches
 
+### 1.3 Entries and registries
 
----
+- `SMILE_CONFIG` — per-model metadata: `model_dir`, `n_members`, `member_digits`,
+  `default_start/end`, `ref_dataset`, `ref_resolution`, `figure_label`, `tp24_unit_mode`
+- `CATCHMENTS` — the five study catchments, slug → title
+- `COMPOUND_CATCHMENTS` — catchments of the compound analysis: `regine_drammen`,
+  `regine_glomma` and the dissolved union `regine_drammen_glomma`. Kept apart from
+  `CATCHMENTS` so the return-period loops stay untouched
+- `GEOJSON_FILES` — slug → GeoJSON filename
+- `MODEL_COLORS`, `MODEL_LABELS`, `MODEL_ORDER` — colours/labels/order of the models in all
+  evaluation figures. They live here rather than in `plot_style.py` to break a circular
+  import with `catchment_tools`
+- `HANS_DATE`, `HANS_SEARCH_YEAR` — Storm Hans reference date and event year
 
-### `catchment_tools.py` — catchment processing and non-plotting data preparation
+### 1.4 Seasons
 
-| Name | Kind | Purpose |
-|---|---|---|
-| `find_weight_file(dataset, resolution, slug)` | function | Locate the area-fraction weight NetCDF for one catchment |
-| `load_weights(path)` | function | Open and return a weight DataArray |
-| `_spatial_dims(da)` | function | Detect `(y_dim, x_dim)` name pair from DataArray dimensions |
-| `weighted_catchment_mean(da, weights)` | function | Area-fraction weighted spatial mean over a catchment |
-| `rolling_accumulation(da, window_days)` | function | Rolling sum over the time dimension — works for 1-D series and 2-D spatial fields |
-| `subset_time_series_by_year(da, start, end)` | function | Year-range clip for any DataArray |
-| `_chunksizes_for(da, time_chunk, y_chunk, x_chunk)` | function | NetCDF chunksizes aligned to da.dims order |
-| `save_spatial_netcdf(da, out_path, var_name, ..., units="mm")` | function | Write a float32 compressed chunked NetCDF — used by all `save_*_overall` functions; `units` defaults to `mm` (pass `kg/m2` for SWE/soil moisture) |
-| `open_precip_cache(cache_path, start_year, end_year)` | function | Open a spatial precipitation cache lazily (`tp24_mm`/`rr_mm`); year-subsets it |
-| `open_field_cache(cache_path, var_name, start_year, end_year)` | function | Generic counterpart of `open_precip_cache` for an explicitly named SWE/soil-moisture variable |
-| `rolling_change(da, window_days, var_name)` | function | Trailing 'last minus first' change over the time window — `da(t) − da(t−(window−1))`; SWE counterpart of `rolling_accumulation` (units inherited, not forced to mm) |
-| `rolling_melt(da, window_days, var_name)` | function | Snowmelt magnitude over the trailing window — `max(0, −(da(t) − da(t−(window−1))))`; only SWE decreases count, as a positive melt flux (gain → 0). Used to pre-build the daily N-day snowmelt caches in load_data_store_postprocessed.ipynb |
-| `rolling_identity(da, window_days, var_name)` | function | Pass-through 'rolling' op for fields whose window quantity is already stored on disk (N-day ΔSWE cache); returns `da` unchanged, `window_days` ignored |
-| `rolling_mean(da, window_days, var_name)` | function | Trailing rolling mean over the window — mean of `da` over `[t−(window−1), t]`; soil-moisture counterpart of `rolling_accumulation` (units inherited, not forced to mm) |
-| `common_cesm2_le_members()` | function | Member IDs present in all three CESM2-LE variable dirs (PRECT ∩ SM ∩ SWE = 90; SM/SWE lack odd members 001–019) |
-| `save_cesm2_le_catchment_field_series(variable, window_days, slug, force)` | function | Build/save ONE `[member, time]` compound-series cache over the full record: per member weighted catchment mean → window op (precip → SUM, SM → MEAN, snowmelt → max(0,−ΔSWE)) |
-| `parse_member_selection(selection, available)` | function | Normalise `"all"` / `"1-30"` / `[3, 4, 27]` member selections; raises with the full list of unavailable members |
-| `load_cesm2_le_catchment_field_series(variable, window_days, slug, start, end, members)` | function | Load + subset a compound-series cache; informative errors name the exact notebook cell that builds/fixes a missing selection |
-| `crop_weight_field_to_nonzero_bbox(da, pad_cells)` | function | Crop a weight DataArray to the bounding box of its active cells |
-| `get_plot_extent_and_crs(da)` | function | Infer tight map extent and Cartopy CRS from a weight DataArray |
-| `load_postproc_dataset(nc_path)` | function | Open a postprocessed grid-level Dataset |
-| `build_catchment_cache(...)` | function | Build and save the catchment-averaged rolling-accumulation NetCDF cache |
-| `load_catchment_cache(...)` | function | Load a catchment-averaged cache |
-| `load_annual_maxima_per_catchment(window_days, start, end)` | function | Load annual maxima for all catchments and all models into a nested dict |
-| `load_daily_values_per_catchment(window_days, start, end)` | function | Load all daily values for all catchments and models |
-| `build_percentile_mapping_table(climate_key, climate_data, refs, percentiles)` | function | Percentile comparison table: SMILE vs reanalysis |
-| `build_distribution_summary_table(annual_maxima)` | function | Summary statistics (mean, std, quantiles) for each model |
-| `get_cached_year_range(dataset, resolution, window_days)` | function | Public wrapper: infer available year range from existing cache files |
-| `load_catchments(geojson_files, geojson_dir)` | function | Load all catchment GeoDataFrames from GeoJSON into EPSG:4326 |
-| `compound_threshold_stats(x_vals, y_vals, threshold, x_max, y_max)` | function | Absolute compound-threshold statistics for one (x, y) sample — `s = x/x_max + y/y_max`, exceedance mask, counts and the two axis intercepts of the criterion line; pure array maths, no I/O |
-| `FREQ_SPREAD_KINDS` | constant | Allowed entries for `FE_SPREAD_SHOW` (`std`, `minmax`, `p025p975`); `std` is the blue ±1σ band, `minmax` and `p025p975` share one dashed style and are mutually exclusive |
-| `resolve_season_months(season)` | function | Month list for a season selector — `"all"` → `None`, a `cfg.SEASON_MONTHS` key, or an ad-hoc `(m1, m2)` tuple wrapping over new year |
-| `season_tag(season)` / `season_label(season)` | function | Filename tag / legend label for a season selector |
-| `require_compound_series(slug, variables, window_days)` | function | Verify the CESM2-LE compound-series caches exist; raises naming the exact cell + `WINDOW_DAYS_COMPOUND` / `COMPOUND_SLUGS` / `COMPOUND_VARIABLES` settings in load_data_store_postprocessed.ipynb that build a missing selection |
-| `validate_frequency_evolution_config(config)` | function | Validate + normalise the `FE_*` block (catchment, combo, window, period, roll length/step, threshold, `FE_SPREAD_SHOW` incl. the mutually-exclusive `minmax`/`p025p975` rule, `FE_NORM_REF` against the stored record); returns a copy with `season_months`, `season_tag`, `record_start/end` and the resolved cache paths |
-| `load_compound_pair(slug, combo, window_days)` | function | Full-record `[member, time]` pair for the two `FE_COMBO` variables, inner-aligned, loaded into memory and the NetCDF handles released |
-| `freeze_normalisation_maxima(da_x, da_y, ref_years, ref_members, season_months)` | function | The FROZEN `x_max` / `y_max` — sample maxima of `FE_NORM_REF`, restricted to the reference member pool AND (when set) to the SEASON months, so the criterion line comes from exactly the population it is later applied to. Computed ONCE so a drifting denominator cannot masquerade as a change |
-| `annual_exceedance_counts(candidate, exceed, years_of_time)` | function | Collapse the `[member, time]` masks to per-calendar-year counts `[member, year]`; cftime/no-leap safe, so a season selection simply leaves the non-season days at zero |
-| `rolling_window_counts(years, k_ary, roll_years, roll_step)` | function | Exceedance counts per member in every COMPLETE centred rolling window (cumsum-based); returns `(starts, centres, counts)` with centre = `start + (L−1)/2`, half-years kept, ends never padded |
-| `ensemble_frequency_statistics(starts, centres, counts, roll_years)` | function | Per-window `f_mean` (= ensemble mean = pooled rate, since all members share one time axis), `sigma` across members, `min`/`max`, `p025`/`p975` (interpolated between members, so unlike min/max not locked to the 1/`roll_years` granularity of an integer event count) and `signal_to_noise` = `f_mean / sigma` (unitless, the quantity Figure 2 draws) |
-| `run_compound_frequency_evolution(config)` | function | Full orchestration: load pair → freeze maxima (reference years + reference members + SEASON) → severity → season/candidate mask → exceedances → annual counts → rolling windows → ensemble statistics. Returns `{config, ensemble, diagnostics}` |
-| `print_frequency_evolution_summary(result)` | function | Console summary — frozen maxima (with the season they were taken over), physical threshold line, candidate/exceedance days, first/last window, mean σ, S/N range and first→last S/N, low-count warning |
-| `write_frequency_evolution_outputs(result, stem, out_paths_fn)` | function | Write `{stem}_ensemble.csv` and `{stem}_metadata.json` next to the PDFs; pass `cfg.compound_freq_figure_paths` as `out_paths_fn` |
+- `SEASONS_ORDER` — `["DJF", "MAM", "JJA", "SON"]`. Drives the 4×3 seasonal figure, which
+  needs exactly four entries, so custom windows do not belong here
+- `SEASON_MONTHS` — season key → month numbers, including the four-month spring window
+  `"MAMJ"` = Mar–Jun. Imported by `data_era5` and `data_smile`. A season is always a named
+  key; there is no ad-hoc `(m1, m2)` selector
+- `SEASON_LABELS` — season key → plot label, e.g. `"MAMJ"` → `"Spring (MAMJ)"`
+- `rate_unit_label(months=None)` — `'events per year'` for all twelve months, otherwise
+  `'events per season'`. Used by both `catchment_tools` (console output) and `plot_style`
+  (y-axis label). Only the label changes; the value is the same, since each year
+  contributes one season
 
+### 1.5 Filename helpers
 
----
+- `res_tag(dataset, resolution)` — filesystem-safe tag, e.g. `era5_0.5x0.5`
+- `acc_tag(window_days)` — `"1day"`, `"2day"`, `"3day"`, …
+- `postproc_dir(dataset)`, `postproc_filename(...)`, `figure_filename(...)` — low-level
+  builders the `*_path` / `*_paths` helpers below compose
+- `smile_reference_tag(reference_dataset, reference_resolution)` — tag for a SMILE
+  reference series used in the Storm Hans figures
 
-### `return_period.py` — pure statistical functions, no I/O
+All N-day path builders (`median_precip_*`, `p90_precip_*`, `*_seasonal_*`,
+`cesm2_window_*`, `era5_interp_window_*`, `field_window_cache_path`) take `window_days` and
+embed `acc_tag(window_days)` in the name. For `window_days=2` the names are identical to
+the older `2day` names, so existing caches and figures stay valid.
 
-| Name | Kind | Purpose |
-|---|---|---|
-| `get_annual_maxima(da, start, end)` | function | Extract annual maximum values from a time series |
-| `weibull_plotting_positions(n)` | function | Empirical return periods using the Weibull formula |
-| `fit_gev(data)` | function | Fit GEV distribution (L-moments or MLE) |
-| `gev_return_level(params, return_period)` | function | Return level for a given return period |
-| `get_event_annual_max(da, event_year)` | function | Annual maximum value for the event year |
-| `estimate_return_period(value, params)` | function | Estimated return period for an observed value |
+### 1.6 Cache paths
 
----
+- `catchment_postproc_path(dataset, resolution, window_days, slug, start, end)` — catchment-
+  averaged time series
+- `overall_precip_path(dataset, resolution, start, end)` — spatial daily cache
+  (ERA5 / seNorge / ERA5-interpolated)
+- `overall_precip_member_path(dataset, member_id, start, end)` — one SMILE member
+- `smile_member_postproc_path(...)`, `smile_yearmax_stats_path(...)` — SMILE per-member
+  catchment cache and the pooled annual-maxima statistics
+- `cesm2_catchment_field_path(window_days, slug, variable, start, end)` — one file per
+  (window, catchment, variable) holding all common members as `[member, time]`;
+  variable is `precipitation`, `soil_moisture` or `snowmelt`
+- `era5_interp_window_median_cache_path(...)` / `..._p90_cache_path(...)`
+- `cesm2_annmedian_cache_path(...)`, `cesm2_window_annmedian_cache_path(...)`,
+  `cesm2_window_p90_cache_path(...)`, `cesm2_window_global_median_cache_path(...)`,
+  `cesm2_window_per_member_medians_cache_path(...)`,
+  `cesm2_window_per_member_p90_cache_path(...)`
+- Seasonal counterparts: `era5_interp_window_seasonal_median_cache_path(...)`,
+  `era5_interp_window_seasonal_p90_cache_path(...)`,
+  `cesm2_window_seasonal_global_median_cache_path(...)`,
+  `cesm2_window_seasonal_per_member_medians_cache_path(...)`,
+  `cesm2_window_seasonal_global_p90_cache_path(...)`,
+  `cesm2_window_seasonal_per_member_p90_cache_path(...)`
+- `field_daily_cache_path(model, kind, start, end, member_id=None, window_days=1)` — daily
+  SWE / soil-moisture cache. `window_days=1` gives the raw `…_1day_…` cache;
+  `window_days>=2` gives the pre-computed N-day snowmelt cache `…_{N}day_…`
+  (SWE only, stored as `max(0, −ΔSWE)`, so gains map to zero)
+- `field_window_cache_path(model, kind, which, window_days, start, end, season="")` —
+  derived median / p90 cache, global or per member, with an optional season
 
-### `plot_style.py` — all Matplotlib/Cartopy figure code
+### 1.7 Figure paths
 
-No raw data loading. No statistical computations.
-
-**Module-level constants (available as `from plot_style import ...`):**
-
-| Name | Kind | Purpose |
-|---|---|---|
-| `FIG_DPI` | constant | Single output-resolution lever (`= 150`). Every `savefig` in this module passes `dpi=FIG_DPI`; lowering it shrinks PDF file sizes (GitHub-friendly) while catchment vectors stay crisp |
-| `figure.dpi` (rcParams) | constant | Set to `FIG_DPI` (150) — resolution of rasterized map content; all map functions use `ax.set_rasterization_zorder(4)` to rasterize coastlines/OCEAN/LAND/pcolormesh at this DPI, keeping catchment outlines/labels as vectors |
-use `ax.set_rasterization_zorder(4)` to convert coastlines/OCEAN/LAND/pcolormesh into compact raster bitmaps at this DPI, keeping catchment vectors crisp |
-| `MAP_PROJ` | constant | Lambert Conformal CRS centred on Scandinavia |
-| `DATA_CRS_LATLON` | constant | PlateCarree (lat/lon) CRS |
-| `DATA_CRS_SENORGE` | constant | UTM zone 33 CRS (seNorge native grid) |
-| `OCEAN_COLOR` | constant | Light blue ocean background |
-| `PRECIP_CMAP` | constant | IPCC sequential precipitation colormap (loaded from `prec_seq.txt`) |
-| `WEIGHT_CMAP` | constant | Viridis colormap for weight fraction maps |
-| `MODEL_COLORS`, `MODEL_LABELS`, `MODEL_ORDER` | imported from `config_paths` | Re-exported for convenience |
-| `PRECIP_DIV_CMAP` | constant | IPCC diverging precipitation colormap (loaded from `prec_div.txt`) |
-| `DOY_CMAP`, `DOY_MAX` | constant | Cyclic day-of-year colormap (`hsv`, Blöschl et al. 2017 wheel) and normalisation bound (366) |
-| `JOINT_VAR_TITLES`, `JOINT_VAR_AXIS_LABELS` | dict | Title fragments and axis labels (with units) for the joint-distribution variables |
-| `JOINT_VAR_FORMULA_NAMES` | dict | Short variable names used inside the mathtext threshold formula (`Precip.`, `Snowmelt`, `Soil Moisture`) |
-| `THRESHOLD_LINE_KW` | dict | ONE style dict for the absolute-threshold line and its legend handle, so drawn line and legend sample cannot drift apart |
-| `COMPOUND_VAR_DISPLAY_NAMES` | dict | Full display names for the frequency-evolution titles (`Precipitation`, `Snowmelt`, `Soil Moisture`) |
-| `FREQ_AXIS_LABEL` | constant | y-axis label of both frequency-evolution figures — `Compound Extremes (events per year)` |
-| `SN_AXIS_LABEL` | constant | y-axis label of Figure 2 — `Signal-to-noise-ratio (unitless)` |
-| `FREQ_MAIN_COLOR`, `FREQ_BAND_COLOR`, `FREQ_ENV_COLOR`, `FREQ_FIG_DPI` | constant | Frequency-evolution palette — mean line reuses `MODEL_COLORS["cesm2_le"]`; ±1σ band and ensemble-spread envelope are deliberately subordinate; PDF output at 300 dpi |
-| `FREQ_FIGSIZE`, `FREQ_AXES_BOX`, `FREQ_LEG_TOP`, `FREQ_LEG_LEFT`, `FREQ_SEL_LEFT`, `FREQ_SEL_INDENT`, `FREQ_LEG_FS`, `FREQ_SEL_FS`, `FREQ_LINE_GAP` | constant | Named geometry of the MeteoSwiss-style two-column legend block below the axes — no magic numbers inside the figure functions |
-
-
-**Functions:**
-
-| Name | Purpose |
-|---|---|
-| `make_figure(da, catchment_title, ...)` | 2-panel timeseries + return-period figure (Storm Hans analysis) |
-| `make_smile_return_period_figure(...)` | SMILE return-period figure |
-| `make_distribution_figure(annual_maxima, window_days, ...)` | Distribution density + boxplot for all models |
-| `make_qq_figure(climate_key, climate_data, reanalysis, ...)` | Q-Q plot: SMILE vs reanalysis |
-| `draw_catchments_numbered(ax, catchments, data_crs, catchment_numbers, ...)` | Draw catchment outlines with circled numbers on any map axes |
-| `_load_ipcc_prec_seq(txt_path)` | Load IPCC precipitation colormap from 256-row RGB text file |
-| `_load_ipcc_prec_div(txt_path)` | Load IPCC precipitation diverging colormap from 256-row RGB text file |
-| `_finite_max_abs(values, fallback=1.0)` | Return max(\|finite values\|), or `fallback` if none are finite. Guards the diverging-norm scaling in `plot_window_interp_3panel` / `_diffonly` / `_diffonly_sig` against the `nanmax` "zero-size array to reduction operation fmax" crash when a difference field is entirely NaN (e.g. grid coords don't align, or all-zero reference field) |
-| `round_up_nice(value)` | Round a value up to a visually clean colorbar upper bound |
-| `colorbar_label(window_days)` | Standard colorbar label string for event precipitation maps |
-| `title_text(combo)` | Standard figure title for Storm Hans event maps |
-| `make_colorbar_ticks(vmax)` | Evenly-spaced tick array for precipitation colorbars |
-| `compute_vmax_by_window(event_fields)` | Fixed colorbar maxima for Storm Hans 1-day and 2-day maps |
-| `plot_precip_map(combo, da_evt, catchments, vmax, out_paths, ...)` | Single-panel Storm Hans event precipitation map |
-| `plot_single_catchment_weight_map(combo, slug, title, da_w, gdf, out_paths)` | One weight-fraction map for a single catchment |
-| `add_month_color_wheel(fig, rect)` | Circular Jan–Dec day-of-year colour legend (polar inset ring; Jan at top, clockwise Jan→Apr→Jul→Oct) |
-| `threshold_formula_mathtext(x_variable, y_variable, threshold)` | ONE definition of the mathtext `x/max(x) + y/max(y) ≥ threshold` expression; used by both `add_absolute_threshold_legend` and `frequency_selection_lines`, so the criterion is never rendered two different ways |
-| `add_absolute_threshold_legend(fig, x_variable, y_variable, threshold, anchor)` | Absolute-threshold legend entry centred under the month wheel; the formula comes from `threshold_formula_mathtext` |
-| `make_joint_distribution_figure(x_vals, y_vals, doy_vals, x_variable, y_variable, window_days, start, end, catchment_title, n_members, out_paths, threshold, x_norm_max, y_norm_max)` | Joint-distribution scatter of two catchment-averaged window quantities — one point per (member, date), coloured by day of year, month-wheel legend, rasterized point layer. With `threshold` (plus the `x_norm_max`/`y_norm_max` from `compound_threshold_stats`) the dashed criterion line and its mathtext legend are added |
-| `frequency_selection_lines(x_variable, y_variable, threshold, window_days, roll_years, n_members, norm_ref, season_label, extra)` | Right-hand legend column of both frequency-evolution figures as (bold key, value) pairs; `Reference:` shows the years only (`1995–2024`) and the season line is dropped when the season is `all` |
-| `_frequency_figure(fig_title, y_label)` / `_finish_frequency_figure(fig, handles, labels, selection_lines, out_paths)` | Shared axes skeleton (`y_label` defaults to `FREQ_AXIS_LABEL`; Figure 2 passes `SN_AXIS_LABEL`), and the MeteoSwiss two-column legend block + PDF save for both frequency-evolution figures |
-| `plot_internal_variability_trend(window_centres, f_mean, sigma, f_min, f_max, ..., roll_years, spread_show, p025, p975, selection_lines, out_paths)` | **Figure 1** — title `Compound ({X} and {Y}) Hazard Frequency for {catchment_title} from {start}-{end}`; the ensemble-mean line is always drawn, `spread_show` adds the blue `± 1 standard deviation` band (`std`) and EITHER `Ensemble spread (min/max member)` (`minmax`) OR `Ensemble spread (2.5/97.5-%)` (`p025p975`) — both dashed, mutually exclusive; plus the ±1σ arrow at the central window, clipped at the axis floor since `f_mean − σ` is negative for rare events → `internal_variability_trend_*.pdf` |
-| `plot_signal_to_noise_ratio(window_centres, s_to_n, x_variable, y_variable, catchment_title, start, end, selection_lines, out_paths)` | **Figure 2** — title `Signal-to-noise-ratio Compound ({X} and {Y}) Hazard for {catchment_title} from {start}-{end}`, y-axis `Signal-to-noise-ratio (unitless)`; single line of `f_mean / sigma` per rolling window, same threshold/window/members/frozen reference/season and the same `selection_lines` legend block as Figure 1 → `signal_to_noise_*.pdf` |
-| `_plot_annmedian_panel(ax, da, dataset_type, ...)` | Draw one panel in an annual median map; returns mesh for shared colorbar |
-| `plot_window_median_2panel(da_cesm2, da_era5, ...)` | 2-panel annual median of N-day rolling precipitation; catchment legend centered at colorbar height |
-| `plot_window_interp_3panel(da_cesm2, da_era5_interp, da_diff, ..., fig_title, seq_cbar_label, div_cbar_label, sig_cesm_higher, sig_era5_higher, sig_legend_text)` | 3-panel: CESM2-LE \| ERA5-interp \| difference — two colorbars; optional per-pixel significance hatching on ERA5 panel (uses `_add_pixel_hatch_overlay` for clean whole-cell `//` and `\\` patterns); combined catchment + significance legend between the two colorbars |
-| `_add_pixel_hatch_overlay(ax, lons, lats, mask, hatch, transform, ...)` | Draw hatch pattern over every `True` cell in mask as individual `Rectangle` patches via `PatchCollection`; avoids the half-pixel artifacts of `contourf`-based hatching |
-| `plot_annual_median_4panel(da_cesm2, da_senorge, da_era5_05, da_era5_025, ...)` | 2×2 panel annual median precipitation map; left-column panels anchored "W" and right-column anchored "E" to spread panels outward; `hspace=0.16`, `wspace=0.05`; colorbar at x=0.15, legend at x=0.72 |
-| `_plot_diff_panel(ax, da, panel_title, catchments, norm, ...)` | Draw one difference panel using diverging colormap |
-| `plot_window_interp_diffonly` | Single-panel diverging difference map (CESM2-LE – ERA5 interp). Catchment legend placed inside panel at bottom-right (`ax.transAxes`). Saves to `out_paths` and closes figure. | `da_diff`, `catchments`, `start_year`, `end_year`, `out_paths`, `fig_title`, `div_cbar_label`, `catchment_numbers`, `catchment_legend_text`, `label_overrides`, `annmedian_extent` |
-| `plot_window_interp_seasonal_4row_3col(seasonal_data, catchments, ...)` | 4×3-panel seasonal significance plot: 4 rows (DJF/MAM/JJA/SON) × 3 columns (CESM2-LE \| ERA5-interp \| diff); season labels bold-vertical on left; column labels bold on top row only; colorbars + legend under bottom row only; shared diverging norm across all seasons |
-
-
+- `figure_paths(...)` — both roots for the `timeseries_return_hans` PDFs
+- `smile_figure_paths(...)` — both roots for the SMILE return-period PDFs
+- `precip_map_figure_paths(fig_subdir, fname)` — both roots for any map PDF; the other map
+  helpers wrap it
+- `annmedian_precip_paths(...)` — 4-panel annual median map
+- `median_precip_paths(fig_subdir, window_days, start, end)` — 2-panel N-day median
+- `median_precip_diff_paths(...)`, `median_precip_diffonly_paths(...)` — 3-panel and
+  single-panel N-day median difference
+- `p90_precip_diff_paths(...)`, `p90_precip_diffonly_paths(...)` — same for the 90th
+  percentile
+- `median_precip_sig_diff_paths(..., pctl_tag)`, `p90_precip_sig_diff_paths(..., pctl_tag)`
+  and their `*_sig_diffonly_paths` counterparts — significance-hatched versions
+- `median_seasonal_precip_sig_diff_paths(...)`, `p90_seasonal_precip_sig_diff_paths(...)` —
+  4×3 seasonal significance figures
+- `p90_single_season_precip_sig_diff_paths(fig_subdir, window_days, season, start, end, pctl_tag)`
+  — the single-season 1×3 figure. `pctl_tag` must keep the `{lo}_{hi}pctl` form so that
+  `plot_window_interp_3panel` picks the same colorbar offset as the annual figure
+- `COMPOUND_FREQ_FIG_SUBDIR` and `compound_freq_figure_paths(fname)` — output folder
+  `compound_flood_risk_output/frequency_evolution` for the rolling-window figures and their
+  CSV/JSON
+- `compound_freq_stem(figtype, window_days, x_variable, y_variable, slug, start, end, roll_years, threshold, norm_ref, season, members)`
+  — shared filename stem. `figtype` is `internal_variability_trend` or `signal_to_noise`.
+  The threshold keeps its decimal point (`thr0.8`, `thr1.0`) and
+  is followed by `_ref{start}-{end}`, because the frozen reference window fixes the position
+  of the threshold line. `_{season}` and `_members{spec}` are appended only when they differ
+  from the defaults
 
 ---
 
-### `generate_weights.py` — run-once script
+## 2. `helper/data_era5.py`
 
-### `generate_weights.py` — weight-generation module
+ERA5 file discovery, loading and spatial-cache builders.
 
-Generates catchment area-fraction weight NetCDF files. Exposes `run_era5_025`,
-`run_gfdl_spear`, `run_cesm2_le` plus shared helpers (`build_weights`,
-`save_weight_nc`, `_run_weight_loop`, `_dissolve_geojson_union`). Now imported
-and invoked from `load_data_store_postprocessed.ipynb` (still runnable as a CLI
-via `--dataset`). `COMBINED_CATCHMENTS` defines union catchments
-(`regine_drammen_glomma` = Drammen ∪ Glomma): their GeoJSONs are dissolved into
-ONE polygon with `unary_union` before the per-cell area fractions are computed,
-so the overlapping border is never double-counted (cells fully inside the union
-get weight 1). Existing weight files are skipped; only re-run if catchment
-boundaries or grid definitions change.
-
-
----
-
-## Notebook files (`code/`)
-
----
-
-### `load_data_store_postprocessed.ipynb`
-
-**Purpose:** Single entry point that builds **all** postprocessed caches consumed
-by the analysis notebooks. Run once (or after raw data / grids change) before
-`create_precip_maps_hans.ipynb` and `compound_flood_risk_analysis.ipynb`.
-**Produces:** no figures — only caches under `postprocessed/`.
-
-**Structure (orchestration only; all logic lives in helper modules):**
-1. Setup — env vars, sys.path, `import config_paths as cfg`
-2. Catchment weights — `generate_weights.run_era5_025` / `run_gfdl_spear` / `run_cesm2_le` (existing files skipped; era5 0.5x0.5 + seNorge weights assumed pre-existing)
-3. Overall precipitation caches — `save_era5_overall` (0.5 + 0.25), `save_senorge_overall`, `save_smile_overall` (both SMILE models)
-4. ERA5-interpolated overall precipitation cache — `save_era5_interpolated_overall`
-5. SWE & soil-moisture daily caches — `save_cesm2_le_field_overall` (per-member) + `save_era5_interpolated_field_overall` for `kind ∈ {swe, soil_moisture}` over the full record
-6. N-day snowmelt caches — `WINDOW_DAYS_SWE` selector (2/3/4) → `save_cesm2_le_field_diff_overall` + `save_era5_interpolated_field_diff_overall` with `rolling_melt` (max(0,−ΔSWE): positive melt, gains→0); saved as `…_swe_{N}day_…` next to the raw 1-day caches. Run once per window
-7. CESM2-LE catchment compound series — `WINDOW_DAYS_COMPOUND` selector (2/3/4/…) → `save_cesm2_le_catchment_field_series` for each `cfg.COMPOUND_CATCHMENTS` slug × {precipitation, soil_moisture, snowmelt}: full-record `[member, time]` caches (90 common members) at `cesm2_le/catchment_averaged/post_processed_cesm2_le_{N}day_{slug}_{variable}_1920-2034.nc`. Run once per window. **Currently only `2day` exists on disk** — this is the cell that both the joint-distribution and the frequency-evolution cells of compound_flood_risk_analysis.ipynb name in their "build it here" errors (`catchment_tools.require_compound_series` / `load_cesm2_le_catchment_field_series`). Its prerequisites (the 1-day spatial member caches from steps 3 and 5) are complete for all 90 members, so a new window needs no raw reload
-
-
-`FORCE_RECOMPUTE_*` flags default to `False`; set `True` to rebuild.
+- `find_era5_files(era5_dir, resolution)` — sorted annual files for one resolution
+- `load_era5_precipitation(era5_files)` — open the annual files lazily and convert `tp24`
+  from metres to mm. Every `save_era5_*_overall` builder goes through this
+- `get_year_range(era5_files, resolution)` — `(start_year, end_year)`
+- `day_start(dt)` — normalise a timestamp to midnight
+- `select_time_range_by_day(da, start, end)` / `select_single_time_by_day(da, day)` —
+  day-level selection, robust to sub-daily timestamps
+- `coord_slice(coord, lower, upper)` — a `slice()` that works on ascending and descending axes
+- `pick_year_file(files, year)` — the single file covering one year
+- `save_era5_overall(resolution, era5_dir, out_path_fn, extent, force)` — build the
+  full-period cropped daily cache
+- `compute_era5_annual_median_2d(...)` — annual median map from that cache
+- `compute_era5_window_median_2d(...)` — N-day rolling median map
+- `find_era5_interpolated_files(era5_interp_dir)` — sorted ERA5-on-CESM2-grid files. The
+  variable prefix is matched generically (`tp` / `sd` / `swvl`), so one function serves
+  precipitation, SWE and soil moisture
+- `get_year_range_era5_interp(files)` — year range of that file list
+- `save_era5_interpolated_overall(era5_interp_dir, out_path_fn, extent, force)` — the
+  interpolated precipitation cache
+- `save_era5_interpolated_field_overall(era5_interp_dir, out_path_fn, variable, cache_var, units, extent, force)`
+  — the interpolated daily SWE / soil-moisture cache, no metre→mm conversion
+- `save_era5_interpolated_field_diff_overall(..., diff_fn, open_cache_fn, window_days, ...)` —
+  the N-day snowmelt cache built from the 1-day cache via `diff_fn`
+- `compute_era5_interpolated_window_median_2d(...)` / `..._p90_2d(...)` — N-day median and
+  90th percentile, cached. The p90 reader accepts both the current
+  `twoday_p90_precip` and the legacy `twodayp90_precip` variable name
+- `_SEASON_MONTHS` — alias of `cfg.SEASON_MONTHS`, so a new season key is picked up here
+  automatically
+- `_filter_season_da(da, season)` — keep the time steps whose month is in the season
+- `compute_era5_interpolated_window_seasonal_median_2d(season, ...)` /
+  `..._seasonal_p90_2d(season, ...)` — seasonal versions, cached
 
 ---
 
+## 3. `helper/data_senorge.py`
 
-### `analysis_return_hans.ipynb`
+Same structure as `data_era5.py` and handling of the seNorge grid.
 
-**Purpose:** Return-period analysis and SMILE return-period analysis for Storm Hans.
-**Produces:** `timeseries_return_hans/` PDF figures.
-**Structure:** Setup → parameter settings → calls to `catchment_tools`, `return_period`, `plot_style`.
-**No reusable function definitions** — those all live in the helper files.
-
----
-
-### `climate_model_evaluation.ipynb`
-
-**Purpose:** Compare CESM2-LE and GFDL-SPEAR against ERA5 / seNorge reanalysis.
-**Produces:** `climate_model_evaluation/` figures:
-- QQ plots per catchment × model × window_days × data_type
-- `daily_distribution` and `annual_max_distribution` PDFs
-
-**Structure:**
-1. Setup cell — env vars, sys.path, `import config_paths`, mkdir
-2. Data-loading cell — `load_annual_maxima_per_catchment`, `load_daily_values_per_catchment`
-3. Distribution figures loop — `make_distribution_figure`
-4. QQ plots loop — `make_qq_figure`
-5. Statistical tables — `build_percentile_mapping_table`, `build_distribution_summary_table`
+- `find_senorge_files(senorge_dir)` — sorted annual files
+- `get_year_range_senorge(files)` — year range
+- `load_senorge_precipitation(senorge_files)` — open and concatenate `rr`, masking the fill
+  value −999.99
+- `latlon_extent_to_utm_bbox(extent)` — `(W, E, S, N)` in degrees → UTM-33 bounding box in
+  metres
+- `save_senorge_overall(senorge_dir, out_path_fn, extent, force)` — full-period cropped
+  daily cache
+- `compute_senorge_annual_median_2d(...)` — annual median map
+- `compute_senorge_2day_median_2d(...)` — 2-day rolling median map
 
 ---
 
-### `create_precip_maps_hans.ipynb`
+## 4. `helper/data_smile.py`
 
-**Purpose:** Spatial precipitation maps for Storm Hans and annual mean / N-day comparison maps (window set by `WINDOW_DAYS`).
-**Produces:** `precip_maps_hans/` figures.
+SMILE (single-model initialized large-ensemble) file discovery, loading and cache builders. Covers `cesm2_le` and
+`gfdl_spear_med_le`.
 
-**Structure:**
-1. Setup cell — imports from all helpers; constants (`MAP_EXTENT`, `MAP_START`, `MAP_END`, `ANN_VMAX`, `TWODAY_VMAX`, `CATCHMENT_NUMBERS`, `COMBINATIONS`, etc.); **window selector `WINDOW_DAYS` (1/2/3/4) with derived `WIN`/`WLABEL` driving all climatology-map filenames and titles**; small notebook-specific helpers (`combo_key`, `build_output_paths`); dependency callables `_open`, `_roll`, `_sub`
-2. Cache-builder pointer cell — overall precipitation caches are now built in `load_data_store_postprocessed.ipynb`; this cell is a no-op pointer
-3. Event data loader cell — defines `load_event_field` (notebook-local, uses EVENT_DATE/ENVELOPE scope)
-4. Event maps cell — defines `run_all_precip_maps` orchestration; calls `plot_precip_map` from `plot_style`
-5. Run event maps cell — `run_all_precip_maps()`
-6. Weight maps cell — `WEIGHT_COMBINATIONS` config; loops `cfg.CATCHMENTS` ∪ `cfg.COMPOUND_CATCHMENTS` (union outline built by dissolving Drammen+Glomma with `unary_union`; dataset×catchment combos without a weight file are skipped); calls `plot_single_catchment_weight_map` from `plot_style`
-7. Run 4-panel cell — calls `compute_era5_annual_median_2d`, `compute_senorge_annual_median_2d`, `compute_cesm2_le_annual_median_2d`, `plot_annual_median_4panel`
-8. Run N-day cell — calls `compute_era5_window_median_2d`, `compute_cesm2_le_window_global_median_2d` (true global median, not median-of-medians), `plot_window_median_2panel`
-9. ERA5-interpolated N-day median difference cell — sets `ERA5_INTERP_TP_DIR` (overall cache built in `load_data_store_postprocessed.ipynb`), `compute_era5_interpolated_window_median_2d`, `plot_window_interp_3panel`, `plot_window_interp_diffonly`
-10. 90th-percentile difference cell — `compute_cesm2_le_window_per_member_p90_2d` (saves global p90 and per-member p90 cache), `compute_era5_interpolated_window_p90_2d`, `plot_window_interp_3panel`, `plot_window_interp_diffonly`
-11. Significance-hatched median diff cell — loads `cesm2_window_per_member_medians` cache, calls `compute_significance_masks` at 5/95 and 2/98 pctile, plots via `plot_window_interp_3panel` with sig overlays
-12. Significance-hatched 90th-pctile diff cell — loads `cesm2_window_per_member_p90` cache, calls `compute_significance_masks` at 5/95 and 2/98 pctile, plots via `plot_window_interp_3panel` with sig overlays
-13. Seasonal data computation cell — `compute_era5_interpolated_window_seasonal_median_2d`, `compute_era5_interpolated_window_seasonal_p90_2d`, `compute_cesm2_le_window_seasonal_global_median_2d`, `compute_cesm2_le_window_seasonal_per_member_p90_2d` for all 4 seasons; stores results in `SEASONAL_MEDIAN_DATA` / `SEASONAL_P90_DATA` dicts keyed by season
-14. Seasonal significance plot cell — `_build_seasonal_list` helper calls `compute_significance_masks` per season then calls `plot_window_interp_seasonal_4row_3col` four times (5/95 median, 2/98 median, 5/95 p90, 2/98 p90) → four PDFs in `precip_maps_hans/`
-15. Spring-only (MAM) 3-panel significance cell — fully self-contained (needs only the setup cell; re-defines `catchments_maps` and `SIG_LEGEND_2_98` locally): calls `compute_era5_interpolated_window_seasonal_p90_2d` + `compute_cesm2_le_window_seasonal_per_member_p90_2d` for `MAM` only (cache reads), then `compute_significance_masks` at 2/98 and `plot_window_interp_3panel` → `2daymedian_MAM_90pctl_precip_2_98pctl_diff_*.pdf` in `precip_maps_hans/`; identical layout to the annual 90th-pctl figure, only the diverging colorbar range differs (data-driven); the `SPRING` key accepts any `cfg.SEASON_MONTHS` entry, including the 4-month `"MAMJ"` (Mar–Jun) window — the first run for a new key builds its caches from the 100 per-member daily caches
-
+- `_FILE_PATTERNS`, `_SMILE_VAR_TOKEN` — per-model filename patterns and the variable token
+  inside them; a new model or variable is registered here
+- `find_smile_members(model_dir, dataset)` — sorted unique member IDs. For CESM2-LE the
+  variable token (PRECT / SWE / SM) is matched generically, and a directory holding mixed
+  variables raises an error
+- `find_smile_files_for_member(model_dir, dataset, member_id, ...)` — chronological files of
+  one member
+- `_convert_smile_tp24_to_mm(da, unit_mode)` — m→mm conversion with auto-detection from the
+  metadata
+- `load_smile_precipitation(files, start, end, unit_mode)` — open, convert, deduplicate and
+  sort one member's precipitation
+- `get_year_range_smile(model_dir, dataset)` — full year range on disk
+- `save_smile_overall(dataset, model_dir, out_path_fn, force, unit_mode)` — per-member daily
+  precipitation caches
+- `load_cesm2_le_field(files, variable, start, end)` — open a CESM2-LE state variable
+  (`SWE` / `SM`) without unit conversion, with the same dedup/sort robustness
+- `save_cesm2_le_field_overall(model_dir, out_path_fn, variable, cache_var, units, force)` —
+  per-member daily SWE / soil-moisture caches in kg/m²
+- `save_cesm2_le_field_diff_overall(..., diff_fn, open_cache_fn, window_days, ...)` —
+  per-member N-day snowmelt caches built from the 1-day caches
+- `compute_cesm2_le_annual_median_2d(...)` — pooled median annual map: all
+  members × years per pixel, then `np.nanmedian`
+- `compute_cesm2_le_window_median_2d(...)` — 100-member median N-day rolling map
+- `compute_cesm2_le_window_p90_2d(...)` — median of the per-member 90th percentiles
+- `compute_cesm2_le_window_global_median_2d(...)` — global median over all members × time
+  per pixel; also writes the per-member medians `[n_members, lat, lon]` needed for the
+  significance test
+- `compute_cesm2_le_window_per_member_p90_2d(...)` — per-member 90th-percentile fields plus
+  the global p90; writes two caches
+- `compute_significance_masks(da_era5, per_member_da, lower_pctl, upper_pctl)` — percentile-
+  rank test without FDR correction. A pixel is flagged when the number of members above
+  (or below) ERA5 reaches `round(upper_pctl/100 · n_members)`. NaN pixels are False.
+  Returns `(sig_cesm_higher, sig_era5_higher)`
+- `_SEASON_MONTHS`, `_season_time_mask(time_values, season)` — season alias and a boolean
+  time mask that handles both `numpy.datetime64` and `cftime.DatetimeNoLeap` axes
+- `compute_cesm2_le_window_seasonal_global_median_2d(season, ...)` /
+  `..._seasonal_per_member_p90_2d(season, ...)` — seasonal versions, two caches each
 
 ---
 
-### `compound_flood_risk_analysis.ipynb`
+## 5. `helper/catchment_tools.py`
 
-**Purpose:** Reproduce the CESM2-LE vs ERA5-interpolated comparison maps from
-`create_precip_maps_hans.ipynb` for **Snowmelt** (signed N-day SWE change,
-ΔSWE = SWE(t) − SWE(t−(N−1))) and **Soil Moisture** (N-day rolling mean), with the
-window N set by `WINDOW_DAYS`. Same methodology: N-day median, 90th percentile,
-percentile-rank significance testing (5/95, 2/98), seasonal breakdown, catchment-3
-diagnostics. Units kg/m². Only 90 of the 100 CESM2-LE members carry SWE/SM output →
-ensemble size auto-detected (n=90).
-**Produces:** `compound_flood_risk_output/` figures (18 PDFs per variable). The
-filename temporal prefix is the window-derived `FSTEM = f"{acc_tag(WINDOW_DAYS)}median"`
-(e.g. `2daymedian_…`), shared by both variables.
-Set: `{fstem}_{var}_diff/diffonly`, `{fstem}_90pctl_{var}_diff/diffonly`,
-significance `{fstem}_{var}_{5_95pctl|2_98pctl}_diff/diffonly` (and `…_90pctl_…`),
-seasonal `{fstem}_seasonal_{var}_…_diff`, and `diagnostic_catchment3_…_{var}`
-strip plots. The `annualmedian_*` and 2-panel overview figures are intentionally
-omitted (they need SeNorge/native-ERA5, absent for SWE/SM).
+Catchment averaging and all non-plotting data preparation.
 
-**Structure (orchestration only; loops over the two variables):**
-1. Setup — `WINDOW_DAYS` selector (1/2/3/4) with derived `WLABEL`/`FSTEM`; `VARIABLES` config (per-variable roller: `rolling_identity` for snowmelt — the ΔSWE difference is pre-computed on disk — and `rolling_mean` for soil moisture; per-variable `daily_window`: SWE→`WINDOW_DAYS`, soil moisture→1), `_open_field`/`figp` helpers, `RECOMPUTE` flag
-2. SWE ΔSWE window-cache availability guard — `_require_swe_window_caches(WINDOW_DAYS)` raises a clear "build it in load_data_store_postprocessed.ipynb" error if the selected N-day ΔSWE cache is missing (soil moisture rolls the 1-day raw cache on the fly, so only SWE is checked)
-3. N-day median + 90th-pctile 3-panel diff + diffonly — `compute_cesm2_le_window_global_median_2d`, `compute_cesm2_le_window_per_member_p90_2d`, `compute_era5_interpolated_window_median_2d`/`_p90_2d`, `plot_window_interp_3panel`/`_diffonly`
-4. Significance-hatched diff (5/95, 2/98) — `compute_significance_masks`, `plot_window_interp_3panel`/`_diffonly_sig`
-5. Diagnostic pixel tables (no PDF)
-6. Seasonal data computation — `compute_cesm2_le_window_seasonal_global_median_2d`/`per_member_p90_2d`, `compute_era5_interpolated_window_seasonal_median_2d`/`_p90_2d`
-7. Seasonal significance 4×3 plots — `plot_window_interp_seasonal_4row_3col`
-7b. Spring-only (MAM) 3-panel significance plot — standalone (needs only the setup cell): calls `compute_cesm2_le_window_seasonal_per_member_p90_2d` + `compute_era5_interpolated_window_seasonal_p90_2d` for `MAM` with `force_recompute=False` (cache reads), then `compute_significance_masks` at 2/98 and `plot_window_interp_3panel` → `2daymedian_MAM_90pctl_{var_word}_2_98pctl_diff_*.pdf`; variables selected via `SPRING_VARS` (default `["snowmelt"]`); the `SPRING` key accepts any `cfg.SEASON_MONTHS` entry, including the 4-month `"MAMJ"` (Mar–Jun) window — the first run for a new key builds its caches from the 100 per-member daily caches
+### 5.1 Weights and spatial averaging
 
-8. Seasonal diagnostic (vmax calibration, no PDF)
-9. Catchment-3 (Losna) per-member strip plots → `diagnostic_catchment3_*` PDFs
-10. Joint-distribution scatter — selection block (`JD_CATCHMENT`, `JD_COMBO`, `JD_WINDOW_DAYS`, `JD_START`/`JD_END`, `JD_MEMBERS`) → `load_cesm2_le_catchment_field_series` (validated, with build-it-here error messages) → `make_joint_distribution_figure` (day-of-year colours + month wheel) → `joint_distribution_{N}day_{var1}_{var2}_{catchment}_{start}-{end}.pdf` in `compound_flood_risk_output/`
-11. Joint-distribution scatter **with the absolute threshold line** — reuses the arrays and the whole `JD_*` selection of the cell above and adds `JD_THRESHOLD`; `compound_threshold_stats` supplies the `x_max`/`y_max` denominators to both the printed exceedance statistics and the drawn line → `joint_distribution_…_thr{JD_THRESHOLD}.pdf`
-12. **Compound frequency evolution — selection + computation** — one short `FE_*` block (catchment, combo, window, period, members, threshold, rolling-window length + step, season, frozen `FE_NORM_REF`/`FE_NORM_REF_MEM`; figure options `FE_SPREAD_SHOW`, `FE_SAVE_CSV` — both live HERE because the cell consumes them) → `run_compound_frequency_evolution` → `print_frequency_evolution_summary` → `write_frequency_evolution_outputs`. Reuses the SAME compound-series caches, N-day operators, member parser and severity definition as items 10–11; the methodological difference is that `max(x)`/`max(y)` are FROZEN on `FE_NORM_REF` **and on `FE_SEASON`**, so the criterion line is derived from exactly the months the exceedances are counted in. `require_compound_series` raises with the exact `WINDOW_DAYS_COMPOUND` / `COMPOUND_SLUGS` / `COMPOUND_VARIABLES` settings to re-run in load_data_store_postprocessed.ipynb when a window other than 2 is selected — only the 2-day series are currently on disk. **Deliberate limitations:** no declustering (an "event" is an exceedance day, so one storm can count up to `FE_WINDOW_DAYS` times) and overlapping rolling windows, so consecutive points are not independent and the curve is a display-only low-pass filter
-13. **Figure 1** `plot_internal_variability_trend` → *"Compound ({X} and {Y}) Hazard Frequency for {catchment_title} from {start}-{end}"* (ensemble mean, `± 1 standard deviation` band, dashed `Ensemble spread (min/max member)` **or** `Ensemble spread (2.5/97.5-%)` per `FE_SPREAD_SHOW`), and **Figure 2** `plot_signal_to_noise_ratio` → *"Signal-to-noise-ratio Compound ({X} and {Y}) Hazard for {catchment_title} from {start}-{end}"* (`f_mean / sigma`, y-axis `Signal-to-noise-ratio (unitless)`). Filenames from `cfg.compound_freq_stem` (`figtype` = `internal_variability_trend` / `signal_to_noise`, incl. the `_ref{start}-{end}` segment), paths from `cfg.compound_freq_figure_paths` → `figures/compound_flood_risk_output/frequency_evolution/`. `frequency_selection_lines` builds the right-hand legend column ONCE in the Figure-1 cell and Figure 2 reuses it, so both legends are identical; the catchment name comes from `cfg.COMPOUND_CATCHMENTS`, the same dict the joint-distribution figures use
-13b. **Exceedance count over the frozen reference window** — standalone diagnostic cell (no PDF), reads `_fe_c`/`_fe_d` from item 12: reloads the pair with `load_compound_pair`, applies `FE_NORM_REF` + `FE_NORM_REF_MEM` + the season months, then calls `compound_threshold_stats` with the FROZEN `x_max`/`y_max` from the diagnostics, so the count is taken against exactly the line both figures draw. Prints exceedances / total points, the percentage, events per member per year, and the analysis-period figures for comparison
+- `find_weight_file(dataset, resolution, catchment_slug, weight_dir=None)` — locate the
+  area-fraction weight NetCDF
+- `load_weights(weight_path)` — open it as a DataArray
+- `_spatial_dims(da)` — detect the `(y_dim, x_dim)` name pair
+- `align_weights_to_precip(precip_da, weights)` — reindex the weight field onto the data
+  grid; raises when the grids cannot be matched
+- `compute_catchment_mean(precip_da, weights)` — the area-fraction weighted spatial mean
+- `crop_to_weight_bbox(da, weights, pad_cells)` — crop to the bounding box of the non-zero
+  weights before averaging, so no full-domain array is loaded
+- `crop_weight_field_to_nonzero_bbox(da, pad_cells)` — the same crop applied to a weight
+  field itself
+- `_mean_step(coord, fallback)` / `get_plot_extent_and_crs(da)` — infer a tight map extent
+  and the Cartopy CRS from a weight field
+- `load_catchments(geojson_files, geojson_dir=None)` — all catchment GeoDataFrames in
+  EPSG:4326
 
-Cache paths come from `cfg.field_daily_cache_path` / `cfg.field_window_cache_path`;
-map figure paths reuse `cfg.precip_map_figure_paths`, the frequency-evolution figure
-and data paths `cfg.compound_freq_stem` / `cfg.compound_freq_figure_paths`. All heavy compute/plot helpers
-are reused unchanged via variable-agnostic discovery + injected cache-openers
-(`open_field_cache`) and rollers. Snowmelt now reads the PRE-COMPUTED daily N-day snowmelt cache (`max(0,−ΔSWE)`: positive melt, gains→0, built with `rolling_melt` in load_data_store_postprocessed.ipynb) via `rolling_identity` (no re-differencing), while soil moisture reads its raw 1-day cache and applies `rolling_mean` on the fly (`rolling_change` retained but unused). The `daily_window` per variable selects the daily cache label (SWE→`{N}day` snowmelt, soil moisture→`1day`). The window N is set once by `WINDOW_DAYS`; the shared filename prefix `FSTEM = f"{acc_tag(WINDOW_DAYS)}median"` (e.g. `2daymedian`) is threaded with `window_days=WINDOW_DAYS` into every compute/cache-path call.
+### 5.2 Cache and time handling
 
-**Frequency-evolution outputs (items 12–13), `figures/compound_flood_risk_output/frequency_evolution/`:**
-`{stem}_ensemble.csv` (window_start/end/centre, n_members, n_events_total, mean_events_per_member, f_mean, sigma, min, max, p025, p975, signal_to_noise) and `{stem}_metadata.json` (full config, frozen maxima, physical threshold, diagnostics, package versions, timestamp) — both carry the same stem as the PDFs, reference window included. The Figure-1 rate is always **events per year**; `f_mean` is simultaneously the ensemble mean and the pooled rate ΣK/(M·L), because all members share one time axis. Figure 2 plots `signal_to_noise` = `f_mean / sigma`, unitless. The mean σ is deliberately kept OFF Figure 1 — it is printed by `print_frequency_evolution_summary` and stored per window in the ensemble CSV. **Granularity:** a member's rate is an INTEGER exceedance count ÷ `FE_ROLL_YEARS` (no annual maximum, no declustering — every day above the threshold counts, so a member can have several events in one year), which means `min`/`max` can only step in 1/L (0.1 at L=10); `p025`/`p975` interpolate between members, and `f_mean`/`sigma` step in 1/(M·L) ≈ 0.001 — which is why the mean, the ±1σ band and the S/N curve are smooth while the min/max envelope is not.
-**Verified invariants:** window centre = `window_start + (L−1)/2` for every L; raising the threshold never increases counts; the frozen maxima are independent of `FE_ROLL_YEARS`; the frozen maxima depend on `FE_SEASON` (season-restricted reference sample); and with `FE_ROLL_YEARS` set to the full period over 1995–2024 and `FE_SEASON = "all"` the single resulting window reproduces the static threshold figure's exceedance count exactly.
+- `save_postproc_dataset(ds, out_path)` / `load_postproc_dataset(nc_path)` — compressed
+  Dataset write / read
+- `_chunksizes_for(da, time_chunk, y_chunk, x_chunk)` — chunk sizes aligned to `da.dims`
+- `save_spatial_netcdf(da, out_path, var_name, ..., units="mm")` — float32 compressed
+  chunked write, used by every `save_*_overall`. Pass `units="kg/m2"` for SWE and soil
+  moisture
+- `open_precip_cache(cache_path, start_year, end_year)` — lazily open a precipitation cache
+  (`tp24_mm` / `rr_mm`) and subset the years
+- `open_field_cache(cache_path, var_name, start_year, end_year)` — the same for an explicitly
+  named SWE / soil-moisture variable
+- `_infer_year_range_from_cache(...)`, `_validate_requested_years(...)`,
+  `get_cached_year_range(dataset, resolution, window_days)` — read the year range out of the
+  cache filenames and validate a requested range against it
+- `subset_time_series_by_year(da, start, end)` — year clip for any DataArray
+
+### 5.3 (Rolling) Window operators
+
+- `rolling_accumulation(da, window_days)` — rolling sum, works for 1-D series and 2-D fields
+- `rolling_change(da, window_days, var_name)` — trailing last-minus-first change,
+  `da(t) − da(t−(N−1))`. Retained but currently unused
+- `rolling_melt(da, window_days, var_name)` — snowmelt magnitude
+  `max(0, −(da(t) − da(t−(N−1))))`, so only SWE decreases count and gains map to zero. Used
+  to pre-build the daily N-day snowmelt caches
+- `rolling_mean(da, window_days, var_name)` — trailing rolling mean, the soil-moisture
+  counterpart
+- `rolling_identity(da, window_days, var_name)` — pass-through for fields whose window
+  quantity is already on disk (the N-day snowmelt cache); returns `da` unchanged
+
+### 5.4 CESM2-LE compound series
+
+- `common_cesm2_le_members()` — members present in all three CESM2-LE variable directories.
+  PRECT ∩ SM ∩ SWE gives 90; SM and SWE lack the odd members 001–019
+- `_CESM2_COMPOUND_SPECS` — per-variable spec (source dir, variable name, window operator,
+  units) for precipitation, soil moisture and snowmelt
+- `_cesm2_compound_window_op(variable, da_daily, window_days)` — dispatch one variable to its
+  window operator, so the N-day definition lives in one place
+- `save_cesm2_le_catchment_field_series(variable, window_days, catchment_slug, force)` —
+  build one `[member, time]` cache over the full record: per member weighted catchment mean,
+  then the window operator (precipitation → sum, soil moisture → mean,
+  snowmelt → `max(0, −ΔSWE)`)
+- `_check_series_reasonableness(da, variable)` — range / sign / all-NaN check after a build;
+  prints a warning instead of failing
+- `parse_member_selection(selection, available)` — normalise `"all"`, `"1-30"` or
+  `[3, 4, 27]`; raises listing the unavailable members
+- `load_cesm2_le_catchment_field_series(variable, window_days, slug, start, end, members)` —
+  load and subset a compound series. Missing selections raise an error naming the notebook
+  cell that builds them
+- `require_compound_series(catchment_slug, variables, window_days)` — check that the caches
+  exist; the error names the `WINDOW_DAYS_COMPOUND` / `COMPOUND_SLUGS` /
+  `COMPOUND_VARIABLES` settings in `load_data_store_postprocessed.ipynb`
+
+### 5.5 Seasons
+
+- `resolve_season_months(season)` — month list for a selector: `"all"` → `None`, otherwise a
+  key of `cfg.SEASON_MONTHS`. Anything else raises, naming the valid keys
+- `season_tag(season)` / `season_label(season)` — filename tag and legend label
+- `subset_season(da, season)` — cut a `[member, time]` series down to the months of a
+  season. An N-day window belongs to the season of its closing day, matching the mask
+  applied inside `run_compound_frequency_evolution`. Raises when nothing is left
+
+### 5.6 Compound thresholds and frequency evolution
+
+- `compound_threshold_stats(x_vals, y_vals, threshold, x_max=None, y_max=None)` — severity
+  `s = x/x_max + y/y_max`, the exceedance mask, the counts and the two axis intercepts of
+  the criterion line. Pure array maths
+- `FREQ_SPREAD_KINDS` — which spread elements Figure 1 draws: `iqr` (blue 25–75 % band),
+  `minmax` and `p025p975`. The latter two share one style and are mutually exclusive
+- `FREQ_SPREAD_METHODS`, `_FREQ_SPREAD_COLUMNS` — how those numbers are obtained. Two
+  percentile-based options: `percentile_empirical` (`np.percentile`; because a member rate
+  is an integer count / L these land on multiples of the rate quantum 1/L, so the curves
+  form a staircase and the IQR band can collapse to zero width) and `percentile_grouped`
+  (default; interpolated, staircase removed). `print_frequency_evolution_summary` reports
+  how many distinct p25 values each flavour produces, which is the diagnostic for the
+  staircase
+- `frequency_spread_columns(spread_method)` — the ensemble-table column names for one
+  method. `central` is always `f_mean`; there is no median column
+- `FREQ_PERCENTILES` — `(2.5, 25.0, 75.0, 97.5)`, driving both the empirical and the grouped
+  columns. No 50th percentile is computed, and no median is drawn anywhere
+- `grouped_percentile(values, q, bin_width, zero_half_bin=True)` — percentiles of a
+  quantised sample, interpolated through the tied blocks as
+  `lower_edge(b) + (target − F)/f · width(b)`, with `F` and `f` from the actual counts
+  (`np.unique`), so empty bins are skipped. Bins are centred except for a half-width zero bin
+  `[0, w/2)`, which keeps low percentiles non-negative. `bin_width` must be `1/roll_years`.
+  Reference case in `helper/test_grouped_percentile.py`
+- `validate_frequency_evolution_config(config)` — validate and normalise the `FE_*` block and
+  return a copy with `season_months`, `season_tag`, `record_start/end`, `spread_method`,
+  `rate_quantum` (= 1/L) and the resolved cache paths. Checks the mutually exclusive
+  `minmax` / `p025p975` rule and rejects `spread_method='std'` and `FE_SPREAD_SHOW=('std',)`
+- `load_compound_pair(catchment_slug, combo, window_days)` — full-record `[member, time]`
+  pair for the two `FE_COMBO` variables, inner-aligned and loaded into memory
+- `freeze_normalisation_maxima(da_x, da_y, ref_years, ref_members, season_months)` — the
+  frozen `x_max` / `y_max`: sample maxima of `FE_NORM_REF`, restricted to the reference
+  member pool and, when set, to the season months, so the criterion line comes from the same
+  population it is applied to
+- `annual_exceedance_counts(candidate, exceed, years_of_time)` — collapse the
+  `[member, time]` masks to per-calendar-year counts `[member, year]`; cftime/no-leap safe,
+  so a season selection simply leaves the out-of-season days at zero
+- `rolling_window_counts(years, k_ary, roll_years, roll_step)` — counts per member in every
+  complete centred rolling window; returns `(starts, centres, counts)` with
+  centre = `start + (L−1)/2`. Half-years are kept, the ends are not padded
+- `ensemble_frequency_statistics(starts, centres, counts, roll_years)` — per window:
+  `f_mean` (ensemble mean, identical to the pooled rate ΣK/(M·L), resolution 1/(M·L)),
+  `sigma` across members, `min` / `max`, `rate_quantum`, the empirical
+  `p025`/`p25`/`p75`/`p975` and the grouped `p025_grouped`/`p25_grouped`/`p75_grouped`/`p975_grouped`,
+  plus `signal_to_noise` = `f_mean / sigma`. Asserts that every member rate is an integer
+  multiple of 1/L
+- `run_compound_frequency_evolution(config)` — the orchestration: load pair → freeze maxima →
+  severity → season and candidate mask → exceedances → annual counts → rolling windows →
+  ensemble statistics. Returns `{config, ensemble, diagnostics}`
+- `print_frequency_evolution_summary(result)` — console summary: frozen maxima and the season
+  they were taken over, the physical threshold line, candidate and exceedance days, first and
+  last window, mean σ, the IQR of the selected method, the rate quantum with the
+  distinct-p25 count empirical vs grouped, the S/N range and a low-count warning
+- `write_frequency_evolution_outputs(result, stem, out_paths_fn)` — write
+  `{stem}_ensemble.csv` and `{stem}_metadata.json` next to the PDFs
+
+### 5.7 Return-period and evaluation tables
+
+- `pool_member_annual_maxima(member_annual_maxima)` — pool the per-member annual-maxima
+  Series of an ensemble into one Series for the GEV fit
+- `_load_or_build_smile_annual_maxima_for_period(...)` — per-member annual maxima for one
+  SMILE period; reads the cache or builds and saves it first
+- `SMILE_REFERENCE_SPECS`, `_load_smile_hans_references(...)` — which SMILE member and period
+  serve as the Storm Hans reference in each figure, and the loader for those series
+- `run_all(dataset, resolution, window_days, ...)` — the main loop over the five catchments
+  for one reanalysis dataset: cache → catchment mean → rolling accumulation → figures
+- `run_all_smile(dataset, model_dir, start_year, end_year, window_days, ...)` — the SMILE
+  counterpart: loop members, pool the annual maxima, produce the ensemble return-period and
+  distribution figures
+- `load_annual_maxima_per_catchment(window_days, start, end)` — annual maxima for all
+  catchments and models as a nested dict
+- `load_daily_values_per_catchment(window_days, start, end)` — the same for the daily values
+- `build_percentile_mapping_table(climate_key, climate_data, refs, percentiles)` — percentile
+  comparison SMILE vs reanalysis
+- `build_distribution_summary_table(annual_maxima)` — mean, std and quantiles per model
+
+---
+
+## 6. `helper/return_period.py`
+
+Return Period statistics
+
+- `get_annual_maxima(da)` — annual maxima of a daily catchment series as a Series indexed by
+  year
+- `weibull_plotting_positions(annual_max)` — empirical return periods, Weibull formula
+- `fit_gev(annual_max)` — GEV fit via scipy MLE; returns `(c, loc, scale)`
+- `gev_return_level(c, loc, scale, return_periods)` — GEV quantiles for an array of return
+  periods
+- `get_event_annual_max(da, search_year)` — `(value, date)` of the annual maximum in the
+  event year
+- `estimate_return_period(event_value, c, loc, scale)` — `T = 1 / (1 − CDF(x))`
+
+---
+
+## 7. `helper/plot_style.py`
+
+All Matplotlib and Cartopy figure code.
+
+### 7.1 Constants
+
+- `fig_dpi` (= 150) — the output-resolution lever; every `savefig` passes it. Lowering it
+  shrinks the PDFs while the catchment vectors stay crisp. The map functions call
+  `ax.set_rasterization_zorder(4)`, so coastlines, ocean, land and pcolormesh become raster
+  at this DPI while the catchment outlines and labels stay vector
+- `MAP_PROJ` — Lambert Conformal centred on Scandinavia
+- `DATA_CRS_LATLON` (PlateCarree), `DATA_CRS_SENORGE` (UTM zone 33), `OCEAN_COLOR`
+- `PRECIP_CMAP`, `PRECIP_DIV_CMAP` — IPCC sequential and diverging colormaps loaded from
+  `prec_seq.txt` / `prec_div.txt` by `_load_ipcc_prec_seq` / `_load_ipcc_prec_div`
+- `WEIGHT_CMAP` — viridis, for the weight-fraction maps
+- `MODEL_COLORS`, `MODEL_LABELS`, `MODEL_ORDER` — re-exported from `config_paths`
+- `DOY_CMAP`, `DOY_MAX` — cyclic day-of-year colormap (`hsv`) and its upper bound (366)
+- `JOINT_VAR_TITLES`, `JOINT_VAR_AXIS_LABELS`, `JOINT_VAR_FORMULA_NAMES` — title fragments,
+  axis labels with units, and the short names used inside the mathtext threshold formula
+- `THRESHOLD_LINE_KW` — the style dict shared by the threshold line and its legend handle
+- `JOINT_SEASON_POINT_COLOR`, `JOINT_SEASON_POINT_ALPHA`, `JOINT_NOWHEEL_LEGEND_ANCHOR` —
+  neutral slate grey (`#6B7C8C`, α 0.30) for a season-restricted joint distribution, where
+  colouring by day of year carries no information, plus the legend anchor that replaces the
+  dropped month wheel
+- `COMPOUND_VAR_DISPLAY_NAMES` — full display names for the frequency-evolution titles
+- `FREQ_AXIS_TEMPLATE` and `freq_axis_label(season_months)` — the Figure 1 y-axis,
+  `Compound Extremes ({unit})`, with the unit from `cfg.rate_unit_label`
+- `SN_AXIS_LABEL` — the Figure 2 y-axis, `Signal-to-noise-ratio (unitless)`
+- `FREQ_MAIN_COLOR`, `FREQ_BAND_COLOR`, `FREQ_ENV_COLOR`, `FREQ_FIG_DPI` — the
+  frequency-evolution palette; the mean line reuses `MODEL_COLORS["cesm2_le"]`
+- `FREQ_BAND_LABELS`, `FREQ_ENV_LABELS` — legend wording per `spread_method`, naming which
+  flavour of percentile is on screen
+- `FREQ_FIGSIZE`, `FREQ_AXES_BOX`, `FREQ_LEG_TOP`, `FREQ_LEG_LEFT`, `FREQ_SEL_LEFT`,
+  `FREQ_SEL_INDENT`, `FREQ_LEG_FS`, `FREQ_SEL_FS`, `FREQ_LINE_GAP` — named geometry of the
+  two-column legend block below the axes, so the figure functions hold no magic numbers
+
+### 7.2 Return-period and evaluation figures
+
+- `make_figure(da, catchment_title, ...)` — 2-panel time series + return period for one
+  catchment
+- `make_smile_return_period_figure(...)` — the SMILE return-period figure
+- `make_distribution_figure(annual_maxima, window_days, ...)` — density plus boxplot for all
+  models
+- `make_qq_figure(climate_key, climate_data, reanalysis, ...)` — Q-Q plot SMILE vs
+  reanalysis
+
+### 7.3 Map helpers
+
+- `draw_catchments(ax, catchments, data_crs, ...)` — plain catchment outlines
+- `draw_catchments_numbered(ax, catchments, data_crs, catchment_numbers, ...)` — outlines with
+  circled numbers
+- `_finite_max_abs(values, fallback=1.0)` — `max(|finite values|)` or the fallback. Guards the
+  diverging-norm scaling against an all-NaN difference field
+- `round_up_nice(value)` — round up to a clean colorbar bound
+- `colorbar_label(window_days)`, `title_text(combo)`, `make_colorbar_ticks(vmax)`,
+  `compute_vmax_by_window(event_fields)` — labels, ticks and the fixed colorbar maxima for
+  the Storm Hans event maps
+- `plot_precip_map(combo, da_evt, catchments, vmax, out_paths, ...)` — one Storm Hans event
+  map
+- `plot_single_catchment_weight_map(combo, catchment_slug, catchment_title, da_w, catchment_gdf, out_paths)`
+  — one weight-fraction map
+- `_plot_annmedian_panel(ax, da, dataset_type, ...)` — one panel of an annual median map;
+  returns the mesh for the shared colorbar
+- `_plot_diff_panel(ax, da, panel_title, catchments, norm, ...)` — one diverging difference
+  panel
+- `_add_pixel_hatch_overlay(ax, lons, lats, mask, hatch, transform, ...)` — draw the hatch
+  over every `True` cell as individual `Rectangle` patches via a `PatchCollection`, which
+  avoids the half-pixel artefacts of `contourf`-based hatching
+- `plot_annual_median_4panel(da_cesm2, da_senorge, da_era5_05, da_era5_025, ...)` — 2×2
+  annual median map
+- `plot_window_median_2panel(da_cesm2, da_era5, ...)` — 2-panel N-day median
+- `plot_window_interp_3panel(da_cesm2, da_era5_interp, da_diff, ..., sig_cesm_higher, sig_era5_higher, sig_legend_text)`
+  — CESM2-LE / ERA5-interp / difference with two colorbars and optional significance
+  hatching, plus a combined catchment and significance legend
+- `plot_window_interp_diffonly(da_diff, ...)` — the single-panel difference map
+- `plot_window_interp_diffonly_sig(da_diff, ..., sig_cesm_higher, sig_era5_higher, sig_legend_text)`
+  — the same with significance hatching
+- `plot_window_interp_seasonal_4row_3col(seasonal_data, catchments, ...)` — 4 rows
+  (DJF/MAM/JJA/SON) × 3 columns, season labels vertical on the left, column labels on the top
+  row, colorbars and legend under the bottom row, one shared diverging norm
+
+### 7.4 Compound figures
+
+- `add_month_color_wheel(fig, rect)` — circular Jan–Dec day-of-year legend, January at the
+  top, running clockwise
+- `threshold_formula_mathtext(x_variable, y_variable, threshold)` — the mathtext
+  `x/max(x) + y/max(y) ≥ threshold`, used by both the legend and the selection lines
+- `add_absolute_threshold_legend(fig, x_variable, y_variable, threshold, anchor)` — the
+  threshold legend entry under the month wheel
+- `make_joint_distribution_figure(x_vals, y_vals, doy_vals, x_variable, y_variable, window_days, start_year, end_year, catchment_title, n_members, out_paths, threshold=None, x_norm_max=None, y_norm_max=None, season_label=None, single_season=False)`
+  — scatter of two catchment-averaged window quantities, one point per (member, date), with
+  a rasterized point layer. With `single_season=False` the points are coloured by day of year
+  and the month wheel is drawn. With `single_season=True` the cloud is already restricted to
+  one season, so all points get `JOINT_SEASON_POINT_COLOR` and the wheel is dropped. Passing
+  `threshold` plus `x_norm_max` / `y_norm_max` adds the dashed criterion line and its legend
+- `frequency_selection_lines(x_variable, y_variable, threshold, window_days, roll_years, n_members, norm_ref, season_label, extra=None)`
+  — the right-hand legend column of the frequency-evolution figures as (bold key, value)
+  pairs. `Reference:` shows the years only; the season line is dropped when the season is
+  `all`
+- `_frequency_figure(fig_title, y_label=None)` / `_finish_frequency_figure(fig, handles, labels, selection_lines, out_paths)`
+  — the shared axes skeleton and the two-column legend block plus PDF save
+- `plot_internal_variability_trend(window_centres, f_mean, band_lo, band_hi, f_min, f_max, ..., roll_years, spread_show, spread_method, p025, p975, season_months, selection_lines, out_paths)`
+  — Figure 1, `internal_variability_trend_*.pdf`. The ensemble mean is the central line.
+  `spread_show` adds the blue IQR band and either the min/max or the 2.5/97.5 % envelope;
+  `spread_method` selects the flavour of the percentile columns and the legend wording;
+  `season_months` sets the y-axis unit
+- `plot_signal_to_noise_ratio(window_centres, s_to_n, x_variable, y_variable, catchment_title, start_year, end_year, selection_lines, out_paths)`
+  — Figure 2, `signal_to_noise_*.pdf`; one line of `f_mean / sigma` per rolling window with
+  the same legend block as Figure 1
+
+---
+
+## 8. `helper/generate_weights.py`
+
+Weight generation just run once. Computes the per-cell area
+fraction of each catchment on each model grid and writes one NetCDF per
+catchment × dataset
+
+- `run_era5_025()`, `run_gfdl_spear()`, `run_cesm2_le()` — the three entry points, also
+  reachable from the command line via `--dataset`; `REGISTRY` maps the names to them
+- `build_weights(geojson_path, ...)`, `save_weight_nc(weights, ...)`, `_run_weight_loop(dataset, ...)`
+  — the shared machinery
+- `_dissolve_geojson(path)` / `_dissolve_geojson_union(paths)`, `_build_projector(dst_epsg)`,
+  `_find_one_smile_file(directory, pattern)` — geometry and grid helpers
+- `COMBINED_CATCHMENTS` — the union catchments, currently `regine_drammen_glomma` =
+  Drammen ∪ Glomma. Their GeoJSONs are dissolved into one polygon with `unary_union` before
+  the area fractions are computed, so the shared border is not double-counted and cells fully
+  inside the union get weight 1
+
+Existing weight files are skipped, so the functions are safe to re-run. 
+
+---
+
+## 9. `helper/test_grouped_percentile.py`
+
+Reference unit test for `catchment_tools.grouped_percentile` with grouped percentiles. Run it with
+`python helper/test_grouped_percentile.py` from the repository root.
+It locks the function against the 2002–2011 CESM2-LE window: 90 members, L = 10, rate quantum w = 0.1, value counts
+`{0.0: 19, 0.1: 30, 0.2: 19, 0.3: 9, 0.4: 6, 0.5: 4, 0.6: 0, 0.7: 2, 0.8: 0, 0.9: 1}`.
+
+- `test_reference_sample_is_well_formed` — 90 members, mean exactly 0.18
+- `test_grouped_percentile_reference_values` — p2.5 = 0.0059, p25 = 0.0617, p50 = 0.1367,
+  p75 = 0.2474, p97.5 = 0.6875 (tolerance 1e-3). p50 is tested as a property of the function,
+  although the analysis never computes a median
+- `test_grouped_percentile_accepts_array_q` — scalar and array `q` agree, shape preserved
+- `test_does_not_fall_back_to_np_percentile` — `np.percentile` still returns the staircase and
+  the grouped values differ from it
+- `test_zero_bin_is_half_width` — the half-width zero bin keeps p2.5 ≥ 0, while
+  `zero_half_bin=False` returns a negative rate
+- `test_empty_bins_are_skipped` — p97.5 lands in the 0.7 bin only when the empty 0.6 and 0.8
+  bins are skipped
+- `test_unsorted_input` — shuffled and sorted input agree
+- `test_degenerate_single_value` — with all members identical the result stays inside that
+  value's bin
+- `test_bin_width_is_not_hardcoded` — L = 15 behaves like L = 10 under rescaling
+- `test_ordering_never_inverts` — p2.5 ≤ p25 ≤ p50 ≤ p75 ≤ p97.5 and all values ≥ 0
+
+---
+
+## 10. Notebooks (`code/`)
+
+The notebooks contain the code execution commands only: imports, parameter blocks and calls into
+`helper/`.
+
+### 10.1 `load_data_store_postprocessed.ipynb`
+
+Builds every postprocessed cache the analysis notebooks read. Run once, and again after the
+raw data or the grids change. Produces no figures.
+
+1. Setup — thread environment variables, `sys.path`, `import config_paths as cfg`
+2. Catchment weights — `generate_weights.run_era5_025` / `run_gfdl_spear` / `run_cesm2_le`.
+   The ERA5 0.5° and seNorge weight files come from an older pipeline and are assumed to
+   exist
+3. Overall precipitation caches — `save_era5_overall` (0.5° and 0.25°), `save_senorge_overall`,
+   `save_smile_overall` for both SMILE models
+4. ERA5-interpolated precipitation cache — `save_era5_interpolated_overall`
+5. SWE and soil-moisture daily caches — `save_cesm2_le_field_overall` per member and
+   `save_era5_interpolated_field_overall`, for `kind ∈ {swe, soil_moisture}` over the full
+   record
+6. N-day snowmelt caches — `WINDOW_DAYS_SWE` (2/3/4) →
+   `save_cesm2_le_field_diff_overall` and `save_era5_interpolated_field_diff_overall` with
+   `rolling_melt`. Saved as `…_swe_{N}day_…` next to the raw 1-day caches; run once per
+   window
+7. CESM2-LE catchment compound series — `WINDOW_DAYS_COMPOUND` →
+   `save_cesm2_le_catchment_field_series` for each `cfg.COMPOUND_CATCHMENTS` slug ×
+   {precipitation, soil_moisture, snowmelt}, giving full-record `[member, time]` caches over
+   the 90 common members. Currently only the 2-day series exist on disk. This is the cell
+   that both compound cells of `compound_flood_risk_analysis.ipynb` name in their error
+   messages. Its inputs (steps 3 and 5) are complete for all members, so a new window needs
+   no raw reload
+
+### 10.2 `analysis_return_hans.ipynb`
+
+Return-period analysis of Storm Hans for the reanalysis datasets and for the two SMILEs.
+Saves Figures to `figures/timeseries_return_hans/`.
+
+1. Setup and dataset selection — `DATASET_KEY` (`era5_0.5` / `era5_0.25` / `senorge`),
+   `WINDOW_DAYS`, the optional year range and `FORCE_RECOMPUTE`
+2. Configuration check — resolves every path, reports the available year range from the raw
+   files (or from the cache filenames when the raw data is not reachable) and lists which
+   catchment caches already exist
+3. Run — `catchment_tools.run_all` over the five catchments
+4. SMILE run table — `SMILE_RUN_TABLE` lists (dataset, window, start, end) combinations
+5. SMILE run — `catchment_tools.run_all_smile` for each entry
+
+### 10.3 `climate_model_evaluation.ipynb`
+
+Compares CESM2-LE and GFDL-SPEAR against ERA5 and seNorge over certain period (1985–2024). Saves Figures to
+`figures/climate_model_evaluation/`.
+
+1. Setup — paths and the figure directories
+2. Data loading — `load_annual_maxima_per_catchment` and `load_daily_values_per_catchment`
+   for the 1-day and 2-day windows
+3. Distribution figures — `make_distribution_figure` per catchment × window × data type →
+   `{data_type}_distribution_{N}day_{slug}_{start}-{end}.pdf`
+4. Q-Q plots — `make_qq_figure` per catchment × window × data type × model
+5. Percentile mapping tables — `build_percentile_mapping_table`, written as CSV
+6. Distribution summary tables — `build_distribution_summary_table`, written as CSV
+
+### 10.4 `create_precip_maps_hans.ipynb`
+
+Storm Hans event maps and the precipitation climatology comparison maps. The accumulation
+window of all climatology maps is set once by `WINDOW_DAYS`, with `WIN` / `WLABEL` derived
+from it for filenames and titles. Writes to `figures/precip_maps_hans/`.
+
+1. Setup — constants (`MAP_EXTENT`, `MAP_START`, `MAP_END`, `ANN_VMAX`, `TWODAY_VMAX`,
+   `CATCHMENT_NUMBERS`, `COMBINATIONS`), the notebook-local helpers `combo_key` and
+   `build_output_paths`, and the dependency callables `_open`, `_roll`, `_sub`
+2. Event loader — `load_event_field`, which reads one year file, crops it, applies the
+   rolling window and takes the pixel-wise maximum over the 7–9 Aug 2023 envelope
+3. Event maps — `run_all_precip_maps` calls `plot_precip_map` for all six
+   dataset × window combinations
+4. Weight maps — `WEIGHT_COMBINATIONS` loops `cfg.CATCHMENTS` ∪ `cfg.COMPOUND_CATCHMENTS`
+   and calls `plot_single_catchment_weight_map`. The Drammen ∪ Glomma outline is built here
+   with `unary_union`; dataset × catchment pairs without a weight file are skipped
+5. 4-panel annual median — `compute_era5_annual_median_2d`,
+   `compute_senorge_annual_median_2d`, `compute_cesm2_le_annual_median_2d`,
+   `plot_annual_median_4panel`
+6. 2-panel N-day median — `compute_era5_window_median_2d`,
+   `compute_cesm2_le_window_global_median_2d`, `plot_window_median_2panel`
+7. N-day median difference vs ERA5-interpolated —
+   `compute_era5_interpolated_window_median_2d`, `plot_window_interp_3panel`,
+   `plot_window_interp_diffonly`
+8. 90th-percentile difference — `compute_cesm2_le_window_per_member_p90_2d`,
+   `compute_era5_interpolated_window_p90_2d`, same two plot functions
+9. Significance-hatched median difference — loads the per-member median cache, calls
+   `compute_significance_masks` at 5/95 and 2/98, plots via `plot_window_interp_3panel`
+10. Significance-hatched 90th-percentile difference — the same with the per-member p90 cache
+11. Diagnostic pixel table — CESM2-LE vs ERA5-interp values, no PDF
+12. Seasonal computation — the four seasonal `compute_*` functions for all four seasons,
+    stored in `SEASONAL_MEDIAN_DATA` / `SEASONAL_P90_DATA`
+13. Seasonal significance plots — `_build_seasonal_list` calls `compute_significance_masks`
+    per season, then `plot_window_interp_seasonal_4row_3col` four times (5/95 and 2/98, median
+    and p90)
+14. Spring-only 3-panel significance — self-contained; computes the seasonal p90 fields for
+    `SPRING` (currently `"MAMJ"`), then `compute_significance_masks` at 2/98 and
+    `plot_window_interp_3panel` → `{N}daymedian_MAMJ_90pctl_precip_2_98pctl_diff_*.pdf`. The
+    layout matches the annual figure; only the diverging colorbar range differs. Any
+    `cfg.SEASON_MONTHS` key works, and the first run for a new key builds its caches from the
+    per-member daily caches
+15. Seasonal diagnostic — per-season maxima and pixel tables for colorbar calibration, no PDF
+16. Catchment-3 diagnostic — grid-cell values by season for Losna, median and 90th percentile
+
+### 10.5 `compound_flood_risk_analysis.ipynb`
+
+The compound flood drivers analysis part.
+
+The first half repeats the map methodology of `create_precip_maps_hans.ipynb` for
+**snowmelt** (the N-day SWE decrease, stored as `max(0, −ΔSWE)`) and **soil moisture**
+(N-day rolling mean): N-day median, 90th percentile, percentile-rank significance at 5/95 and
+2/98, and the seasonal breakdown. Units are kg/m². Only 90 of the 100 CESM2-LE members carry
+SWE and SM output, so the ensemble size is detected automatically. The `annualmedian_*` and
+2-panel overview figures are left out, because they would need seNorge and native ERA5, which
+do not exist for these variables. The filename prefix is
+`FSTEM = f"{acc_tag(WINDOW_DAYS)}median"`.
+
+The second half is the compound analysis joint distribution of two catchment-
+averaged window quantities and the evolution of the compound exceedance frequency.
+
+1. Setup — `WINDOW_DAYS` with the derived `WLABEL` / `FSTEM`, the `VARIABLES` configuration
+   (per-variable roller: `rolling_identity` for snowmelt, since the difference is
+   pre-computed on disk, and `rolling_mean` for soil moisture; per-variable `daily_window`:
+   SWE → `WINDOW_DAYS`, soil moisture → 1), the `_open_field` / `figp` helpers and the
+   `RECOMPUTE` flag
+2. Cache guard — `_require_swe_window_caches(WINDOW_DAYS)` fails early with a pointer to
+   `load_data_store_postprocessed.ipynb` when the N-day snowmelt cache is missing. Soil
+   moisture rolls its 1-day cache on the fly, so only SWE is checked
+3. Seasonal cache builder — the seasonal median and p90 computations for both variables
+4. N-day median and 90th-percentile 3-panel and diff-only maps
+5. Significance-hatched differences at 5/95 and 2/98
+6. Diagnostic pixel tables, no PDF
+7. Seasonal 4×3 significance plots
+8. Spring-only 3-panel significance — standalone, `SPRING = "MAMJ"`, variables chosen with
+   `SPRING_VARS` (default `["snowmelt"]`)
+9. Seasonal diagnostic for colorbar calibration, no PDF
+10. Catchment-3 (Losna) per-member strip plots → `diagnostic_catchment3_*`
+11. Joint distribution — the `JD_*` selection block (`JD_CATCHMENT`, `JD_COMBO`,
+    `JD_WINDOW_DAYS`, `JD_START` / `JD_END`, `JD_MEMBERS`, `JD_SEASON`) →
+    `load_cesm2_le_catchment_field_series` → `subset_season` →
+    `make_joint_distribution_figure`. `JD_SEASON = "all"` keeps the day-of-year colours and
+    the month wheel; any season sets `single_season=True`, so the points are drawn in one
+    neutral grey and the wheel is dropped →
+    `joint_distribution_{N}day_{var1}_{var2}_{catchment}_{start}-{end}[_{season}].pdf`
+12. Joint distribution with the threshold line — reuses the arrays and the whole `JD_*`
+    selection of the previous cell and adds `JD_THRESHOLD`. `compound_threshold_stats`
+    supplies the `x_max` / `y_max` denominators for both the printed statistics and the drawn
+    line → `joint_distribution_…_thr{JD_THRESHOLD}.pdf`
+13. Frequency evolution, selection and computation — the `FE_*` block (catchment, combo,
+    window, period, members, threshold, rolling-window length and step, season, the frozen
+    `FE_NORM_REF` / `FE_NORM_REF_MEM`, and the figure options `FE_SPREAD_SHOW`,
+    `FE_SPREAD_METHOD`, `FE_SAVE_CSV`) → `run_compound_frequency_evolution` →
+    `print_frequency_evolution_summary` → optionally `write_frequency_evolution_outputs`. It
+    reuses the same caches, window operators, member parser and severity definition as items
+    11–12; the difference is that `max(x)` and `max(y)` are frozen on `FE_NORM_REF` and on
+    `FE_SEASON`, so the criterion line comes from exactly the months the exceedances are
+    counted in. Two filename stems are built: `_fe_stem1` and `_fe_stem2`.
+    Known limitations: no declustering, so an event is an exceedance day and one storm can
+    count up to `FE_WINDOW_DAYS` times; and the rolling windows overlap, so consecutive
+    points are not independent and the curve acts as a display-only low-pass filter
+14. Figure 1 — `plot_internal_variability_trend`, *"Compound ({X} and {Y}) Hazard Frequency
+    for {catchment} from {start}-{end}"*. The cell looks the columns up with
+    `frequency_spread_columns(_fe_c["spread_method"])` rather than hardcoding them
+15. Figure 2 — `plot_signal_to_noise_ratio`, *"Signal-to-noise-ratio Compound ({X} and {Y})
+    Hazard for {catchment} from {start}-{end}"*. It reuses the `FE_SELECTION` legend block
+    built in the Figure 1 cell, so both legends are identical
+
+Cache paths come from `cfg.field_daily_cache_path` and `cfg.field_window_cache_path`. Map
+figure paths reuse `cfg.precip_map_figure_paths`, and the frequency-evolution outputs use
+`cfg.compound_freq_stem` and `cfg.compound_freq_figure_paths`. 
+
+**Frequency-evolution data outputs** (written when `FE_SAVE_CSV = True`, next to the PDFs in
+`figures/compound_flood_risk_output/frequency_evolution/`):
+
+- `{stem}_ensemble.csv` — window_start / end / centre, n_members, n_events_total,
+  mean_events_per_member, f_mean, sigma, min, max, rate_quantum, p25, p75, p025, p975,
+  p025_grouped, p25_grouped, p75_grouped, p975_grouped, signal_to_noise
+- `{stem}_metadata.json` — the full configuration including `spread_method` and
+  `rate_quantum`, the frozen maxima, the physical threshold, the diagnostics, the package
+  versions and a timestamp
+
+Both carry the same stem as the PDFs and also windows. The rate unit follows the
+season (`cfg.rate_unit_label`): `events per year` for an all-months run, `events per season`
+for any subset. The value is the same either way, since each year contributes one season, and
+it is never converted to a per-decade rate, so it stays comparable when `FE_ROLL_YEARS`
+changes.
 

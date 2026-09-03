@@ -160,7 +160,7 @@ def _spatial_dims(da: xr.DataArray) -> tuple[str, str]:
             return lat_name, lon_name
     raise ValueError(
         f"Cannot identify spatial dimensions in: {list(da.dims)}\n"
-        f"Expected one of: (latitude, longitude), (Y, X)")
+        f"Expected one of: (latitude, longitude), (lat, lon), (Y, X), (y, x)")
 
 # ─── Grid alignment ───
 def align_weights_to_precip(precip_da: xr.DataArray,
@@ -369,14 +369,6 @@ def open_field_cache(cache_path: Path, var_name: str,
         ds.close()
         raise KeyError(f"Variable {var_name!r} not found in {cache_path}")
     return subset_time_series_by_year(ds[var_name], start_year, end_year)
-
-
-def _spatial_dims(da: xr.DataArray) -> tuple[str, str]:
-    """Return the (y_dim, x_dim) name pair for a spatial DataArray."""
-    for y, x in [("latitude", "longitude"), ("lat", "lon"), ("Y", "X")]:
-        if y in da.dims and x in da.dims:
-            return y, x
-    raise ValueError(f"Unsupported weight-grid dimensions: {da.dims}")
 
 
 def crop_weight_field_to_nonzero_bbox(da: xr.DataArray,
@@ -911,45 +903,126 @@ def compound_threshold_stats(
 #   • rolling windows overlap by (L − FE_ROLL_STEP) years, so consecutive points
 #     are not independent — the curve is a display-only low-pass filter.
 
-# Figure-1 spread flags. "std" is the blue ±1σ band; "minmax" and "p025p975" are
-# the dashed envelope and are mutually exclusive (they share one line style).
-FREQ_SPREAD_KINDS   = ("std", "minmax", "p025p975")
+# Figure-1 spread flags — WHICH spread elements are drawn. "iqr" is the blue
+# 25th-75th-percentile band (the box of a classic box plot); "minmax" and
+# "p025p975" are the dashed/dotted envelope and are mutually exclusive (they share
+# one line style).
+FREQ_SPREAD_KINDS   = ("iqr", "minmax", "p025p975")
+
+# HOW the band/envelope numbers are obtained — orthogonal to WHICH of them are
+# drawn (FREQ_SPREAD_KINDS above). Exactly two options, both percentile-based:
+#   "percentile_empirical" → np.percentile. Because a member rate is an integer
+#                            count / L these land exactly on multiples of the rate
+#                            quantum 1/L, so the curves form a staircase and the
+#                            IQR band can collapse to zero width. Kept as the
+#                            reference the grouped version is compared against.
+#   "percentile_grouped"   → the interpolated (grouped) percentiles of
+#                            `grouped_percentile`, which remove that staircase.
+# There is no standard-deviation / "std" option: the ±1σ band was replaced by the
+# IQR band and the legacy "std" alias has been removed everywhere.
+FREQ_SPREAD_METHODS = ("percentile_empirical", "percentile_grouped")
+
+# Ensemble-table columns Figure 1 reads for each method. The CENTRAL line is
+# method-independent and added by `frequency_spread_columns` below.
+_FREQ_SPREAD_COLUMNS: dict[str, dict[str, str]] = {
+    "percentile_empirical": dict(band_lo="p25",         band_hi="p75",
+                                 env_lo="p025",         env_hi="p975"),
+    "percentile_grouped":   dict(band_lo="p25_grouped", band_hi="p75_grouped",
+                                 env_lo="p025_grouped", env_hi="p975_grouped"),
+}
+
+
+def frequency_spread_columns(spread_method: str) -> dict[str, str]:
+    """Ensemble-table column names Figure 1 must read for one `spread_method`.
+
+    Keeps the method → column mapping out of the notebook (orchestration only) and
+    out of plot_style (drawing only): the Figure-1 cell looks the columns up here
+    and hands plot_style plain arrays.
+
+    Returns
+    -------
+    dict with keys
+        central : ALWAYS "f_mean" — the central line of every figure in this
+                  analysis is the ensemble MEAN, whose resolution is 1/(M·L)
+                  rather than the 1/L of a rank statistic, and it is the same
+                  quantity the signal-to-noise figure divides by sigma. NO median
+                  is computed or drawn anywhere in this analysis.
+        band_lo/band_hi, env_lo/env_hi : the p25/p75 band and the p2.5/p97.5
+                  envelope of the selected method.
+    """
+    m = str(spread_method).strip().lower()
+    if m not in FREQ_SPREAD_METHODS:
+        raise ValueError(f"spread_method={spread_method!r} invalid; "
+                         f"pick one of {list(FREQ_SPREAD_METHODS)}.")
+    cols = dict(_FREQ_SPREAD_COLUMNS[m])
+    cols["central"] = "f_mean"
+    return cols
 
 
 # ── Season handling ───────────────────────────────────────────────────────────
 def resolve_season_months(season) -> list[int] | None:
     """Month numbers for a season selector; `None` means 'all months'.
 
-    season : "all" | key of cfg.SEASON_MONTHS ("DJF", "MAM", "MAMJ", …)
-             | (first_month, last_month), inclusive, wrapping over new year.
+    season : "all" | key of cfg.SEASON_MONTHS ("DJF", "MAM", "JJA", "SON", "MAMJ")
+
+    A season is ALWAYS a named key, never an ad-hoc month range: every window the
+    analysis may use is defined once in cfg.SEASON_MONTHS, so the filename tag,
+    the legend label and the month list can never disagree. Add a new window
+    there (plus its label in cfg.SEASON_LABELS) rather than passing months here.
     """
-    if isinstance(season, (tuple, list)):
-        m1, m2 = int(season[0]), int(season[1])
-        if not (1 <= m1 <= 12 and 1 <= m2 <= 12):
-            raise ValueError(f"FE_SEASON months must be in 1–12; got {season!r}.")
-        return list(range(m1, m2 + 1)) if m1 <= m2 else list(range(m1, 13)) + list(range(1, m2 + 1))
     key = str(season).strip()
     if key.lower() == "all":
         return None
     if key not in cfg.SEASON_MONTHS:
-        raise ValueError(f"FE_SEASON={season!r} unknown. Use 'all', an (m1, m2) tuple, "
-                         f"or one of {sorted(cfg.SEASON_MONTHS)} "
-                         "(new named windows go into cfg.SEASON_MONTHS).")
+        raise ValueError(f"FE_SEASON/JD_SEASON={season!r} unknown. Use 'all' or one of "
+                         f"{sorted(cfg.SEASON_MONTHS)} — new named windows go into "
+                         "cfg.SEASON_MONTHS (and cfg.SEASON_LABELS).")
     return list(cfg.SEASON_MONTHS[key])
 
 
 def season_tag(season) -> str:
-    """Filename tag for a season selector ('all' → 'all')."""
-    return (f"m{int(season[0]):02d}-m{int(season[1]):02d}"
-            if isinstance(season, (tuple, list)) else str(season).strip())
+    """Filename tag for a season selector ('all' → 'all', otherwise the key)."""
+    return str(season).strip()
 
 
 def season_label(season) -> str:
     """Legend label for a season selector."""
-    if isinstance(season, (tuple, list)):
-        return f"months {int(season[0]):02d}–{int(season[1]):02d}"
     key = str(season).strip()
     return "all months" if key.lower() == "all" else cfg.SEASON_LABELS.get(key, key)
+
+
+def subset_season(da: xr.DataArray, season) -> xr.DataArray:
+    """Cut a [member, time] series down to the months of `season`.
+
+    The joint-distribution counterpart of the season mask applied inside
+    `run_compound_frequency_evolution`, so BOTH analyses reduce the record the
+    same way before anything else happens: an N-day window that straddles two
+    seasons belongs to the season of its CLOSING day (the time stamp the N-day
+    operator writes), and every downstream statistic — sample maxima, threshold
+    line, exceedance counts — then sees in-season days only.
+
+    Parameters
+    ----------
+    da     : DataArray with a `time` coordinate (cftime-safe)
+    season : "all" (returns `da` unchanged) | key of cfg.SEASON_MONTHS
+             ("DJF", "MAM", "JJA", "SON", "MAMJ") — the same selector
+             `resolve_season_months` accepts.
+
+    Returns
+    -------
+    xr.DataArray with only the in-season time steps.
+    """
+    months = resolve_season_months(season)
+    if months is None:
+        return da
+    keep = np.isin(da["time"].dt.month.values, months)
+    if not keep.any():
+        raise ValueError(
+            f"No time steps left after restricting to season {season!r} "
+            f"(months {sorted(months)}) — check JD_SEASON in the joint-distribution "
+            "cell / FE_SEASON in the frequency-evolution cell of "
+            "compound_flood_risk_analysis.ipynb.")
+    return da.isel(time=keep)
 
 
 # ── Cache availability ────────────────────────────────────────────────────────
@@ -1029,16 +1102,32 @@ def validate_frequency_evolution_config(config: dict) -> dict:
         raise ValueError(f"FE_THRESHOLD={c['threshold']} must be > 0 (max possible score = 2.0).")
     c["threshold"] = float(c["threshold"])
 
-    bad = [v for v in c["spread_show"] if v not in FREQ_SPREAD_KINDS]
-    if bad or not len(c["spread_show"]):
+    # The blue band is the interquartile range (25-75%). No "std" alias exists any
+    # more — the ±1σ band was replaced by the IQR band and "std" is not accepted.
+    spread = tuple(str(v).strip() for v in c["spread_show"])
+    bad = [v for v in spread if v not in FREQ_SPREAD_KINDS]
+    if bad or not len(spread):
         raise ValueError(f"FE_SPREAD_SHOW={tuple(c['spread_show'])!r} invalid; "
                          f"pick any of {list(FREQ_SPREAD_KINDS)}.")
-    if "minmax" in c["spread_show"] and "p025p975" in c["spread_show"]:
+    if "minmax" in spread and "p025p975" in spread:
         raise ValueError("FE_SPREAD_SHOW: pick EITHER 'minmax' OR 'p025p975' — both are "
                          "drawn as the same dashed envelope and would overlap.")
-    c["spread_show"] = tuple(c["spread_show"])
+    c["spread_show"] = spread
+
+    # HOW the band/envelope numbers are obtained — the only two options are the
+    # empirical (np.percentile) and the grouped (interpolated) percentiles.
+    method = str(c.get("spread_method", "percentile_grouped")).strip().lower()
+    if method not in FREQ_SPREAD_METHODS:
+        raise ValueError(f"FE_SPREAD_METHOD={c.get('spread_method')!r} invalid; "
+                         f"pick one of {list(FREQ_SPREAD_METHODS)}.")
+    c["spread_method"] = method
+
+    # The rate quantum every grouped percentile is binned on — 1/L, derived from
+    # the window length actually used in this run.
+    c["rate_quantum"] = 1.0 / float(L)
 
     lo, hi = (int(v) for v in c["norm_ref"])
+
     if lo > hi or lo < rec_s or hi > rec_e:
         raise ValueError(f"FE_NORM_REF={lo}–{hi} must lie inside the stored record "
                          f"{rec_s}–{rec_e}.")
@@ -1115,6 +1204,99 @@ def freeze_normalisation_maxima(da_x: xr.DataArray, da_y: xr.DataArray,
         raise ValueError(f"Frozen maxima must be > 0 (got x_max={x_max}, y_max={y_max}).")
     return x_max, y_max
 
+# ── Grouped (interpolated) percentiles of a quantised rate ────────────────────
+# A member's rate is an INTEGER exceedance count divided by the window length L,
+# so it can only take multiples of the rate quantum w = 1/L. np.percentile then
+# also lands exactly on a multiple of w: in a window where 30 of 90 members sit at
+# 0.1, p25 and p50 are BOTH 0.1 and the IQR band collapses to zero width, and over
+# the full record the percentile curves become a staircase that hides the signal.
+# `grouped_percentile` treats each attainable value as the CENTRE of a bin and
+# interpolates through the tied block instead of returning the block label, which
+# restores a continuous curve without touching the counting itself.
+
+def grouped_percentile(values, q, bin_width: float, zero_half_bin: bool = True):
+    """Percentiles of a quantised sample, interpolated THROUGH the tied blocks.
+
+    Pure, per-window and testable: one call handles the M member rates of ONE
+    rolling window. See helper/test_grouped_percentile.py for the reference case.
+
+    Method
+    ------
+    With n = len(values) and target = (q/100) · n, find the bin b whose actual
+    member counts satisfy  cum_below(b) < target <= cum_upto(b)  and return
+
+        lower_edge(b) + (target − F) / f · width(b)
+
+    where F is the number of members in bins strictly BELOW b and f the number of
+    members IN b. F and f come from the real counts (`np.unique`), so bins that
+    happen to be empty are simply absent and are skipped correctly.
+
+    Bin edges
+    ---------
+    Centred bins EXCEPT at zero, which is a HALF-width bin starting at 0:
+
+        value 0      → [0, w/2)                width w/2
+        value k·w    → [k·w − w/2, k·w + w/2)  width w,  k >= 1
+
+    A rate cannot be negative; with a naive symmetric bin at zero the low
+    percentiles would come out negative. `zero_half_bin=False` restores that naive
+    behaviour and exists only to demonstrate the difference.
+
+    Parameters
+    ----------
+    values : 1-D array-like
+        The M member rates of ONE window, in any order. NaNs are dropped.
+    q : float or array-like
+        Percentile(s) in [0, 100].
+    bin_width : float
+        The rate quantum w. Pass 1 / roll_years — NEVER a hardcoded 0.1, so a
+        change of L propagates automatically.
+    zero_half_bin : bool
+        Keep the zero bin at half width (default, correct for a non-negative rate).
+
+    Returns
+    -------
+    float if `q` is scalar, else np.ndarray with the shape of `q`.
+    """
+    v = np.asarray(values, dtype=float).ravel()
+    v = v[np.isfinite(v)]
+    if v.size == 0:
+        raise ValueError("grouped_percentile: no finite values in this window.")
+    w = float(bin_width)
+    if not np.isfinite(w) or w <= 0.0:
+        raise ValueError(f"grouped_percentile: bin_width must be > 0 (got {bin_width!r}).")
+
+    q_arr = np.atleast_1d(np.asarray(q, dtype=float))
+    if np.any(q_arr < 0.0) or np.any(q_arr > 100.0):
+        raise ValueError(f"grouped_percentile: q must lie in [0, 100] (got {q!r}).")
+
+    # Bin index of every member = value / w, which must be an integer by construction.
+    k = np.rint(v / w).astype(np.int64)
+    off = np.abs(v / w - k)
+    if np.any(off > 1e-6):
+        raise ValueError(
+            f"grouped_percentile: value {v[int(np.argmax(off))]!r} is not a multiple "
+            f"of bin_width={w!r}. The rate must be an integer count / L — pass "
+            "bin_width = 1 / roll_years.")
+    if np.any(k < 0):
+        raise ValueError("grouped_percentile: negative rates are not supported.")
+
+    # np.unique returns ONLY the occupied levels, ascending — empty bins never
+    # enter the cumulative counts and are therefore skipped by construction.
+    levels, counts = np.unique(k, return_counts=True)
+    lower = levels * w - 0.5 * w
+    if zero_half_bin and levels[0] == 0:
+        lower[0] = 0.0                      # a rate cannot be negative
+    width  = (levels * w + 0.5 * w) - lower
+    cum    = np.cumsum(counts)              # cum_upto(b)
+    F      = cum - counts                   # cum_below(b), from ACTUAL counts
+
+    target = (q_arr / 100.0) * v.size
+    b = np.clip(np.searchsorted(cum, target, side="left"), 0, levels.size - 1)
+    out = lower[b] + (target - F[b]) / counts[b] * width[b]
+    out = np.where(target <= 0.0, lower[0], out)     # q = 0 → lowest bin edge
+    return float(out[0]) if np.ndim(q) == 0 else out.reshape(np.shape(q))
+
 
 # ── Annual counts → rolling windows → ensemble statistics ─────────────────────
 def annual_exceedance_counts(candidate: np.ndarray, exceed: np.ndarray,
@@ -1150,24 +1332,67 @@ def rolling_window_counts(years: np.ndarray, k_ary: np.ndarray, roll_years: int,
     return (years[i0], years[i0] + (L - 1) / 2.0, k_cum[:, i0 + L] - k_cum[:, i0])
 
 
+# Percentiles computed for every window, in BOTH the empirical and the grouped
+# flavour — one list, so the two versions can never drift apart.
+FREQ_PERCENTILES = (2.5, 25.0, 75.0, 97.5)
+
+
 def ensemble_frequency_statistics(starts: np.ndarray, centres: np.ndarray,
                                   counts: np.ndarray, *, roll_years: int
                                   ) -> pd.DataFrame:
-    """Per-window ensemble statistics of the compound-extreme rate (events/year).
+    """Per-window ensemble statistics of the compound-extreme rate.
 
-    Per member the rate is K_m(W)/L; `f_mean` is both the ensemble mean AND the
-    pooled rate ΣK/(M·L), because all members share one time axis. `sigma` is the
+    The rate unit is `cfg.rate_unit_label(season_months)` — 'events per year' for
+    an all-months run, 'events per season' for any month subset. The VALUE is the
+    same either way (each year contributes exactly one season); only the label
+    differs. It is never converted to a per-decade rate, so it stays comparable
+    when the window length L changes.
+
+    Per member the rate is K_m(W)/L. No median is computed or drawn anywhere in
+    this analysis. `f_mean` is the ensemble MEAN across members
+    — the central line of Figure 1 and the numerator of the unitless
+    signal-to-noise ratio of Figure 2 (S/N = f_mean / sigma). Its resolution is
+    1/(M·L), so it is smooth where every rank statistic is not. `sigma` is the
     sample standard deviation ACROSS MEMBERS — the internal-variability measure
-    Figure 1 draws as its ±1σ band, and the denominator of the unitless
-    signal-to-noise ratio of Figure 2 (S/N = f_mean / sigma).
+    and the denominator of the S/N ratio. Neither is touched by the grouped
+    percentiles added below.
+
+    Percentile columns come in two flavours:
+      `p025`/`p25`/`p75`/`p975`           — np.percentile, kept selectable as the
+        reference version; because a member rate is an integer count / L these
+        land exactly on multiples of the rate quantum 1/L and form a staircase;
+      `p025_grouped`/`p25_grouped`/`p75_grouped`/`p975_grouped`
+        — `grouped_percentile`, which interpolates THROUGH the tied blocks and
+        removes that staircase.
+
+    The rate quantum handed to `grouped_percentile` is derived as 1/roll_years —
+    never hardcoded — and every member rate is asserted to be an integer multiple
+    of it, so a rate produced some other way fails loudly instead of being binned
+    wrongly.
 
     Returns
     -------
     pd.DataFrame with one row per rolling window: window_start/end/centre,
     n_members, n_events_total, mean_events_per_member, f_mean, sigma, min, max,
-    p025, p975, signal_to_noise.
+    rate_quantum, p25, p75, p025, p975, p025_grouped, p25_grouped, p75_grouped,
+    p975_grouped, signal_to_noise.
     """
-    rates = counts / float(roll_years)          # [member, window], events per year
+    L     = float(roll_years)
+    rates = counts / L            # [member, window], see the unit note above
+    # CHANGE 3: the rate quantum follows the window length, never a literal 0.1.
+    bin_width = 1.0 / L
+
+    # The grouped percentiles are only meaningful if every member rate really is
+    # an integer count / L — fail loudly rather than bin a differently produced rate.
+    scaled = rates * L
+    dev = float(np.max(np.abs(scaled - np.rint(scaled)))) if scaled.size else 0.0
+    if dev > 1e-9:
+        raise ValueError(
+            f"ensemble_frequency_statistics: member rates are not multiples of the "
+            f"rate quantum 1/roll_years = {bin_width:.6g} (worst deviation {dev:.3g} "
+            "counts). The rate must stay an INTEGER exceedance count divided by the "
+            "window length L — check annual_exceedance_counts / rolling_window_counts.")
+
     out = pd.DataFrame({
         "window_start":  starts.astype(int),
         "window_end":    starts.astype(int) + roll_years - 1,
@@ -1175,18 +1400,29 @@ def ensemble_frequency_statistics(starts: np.ndarray, centres: np.ndarray,
         "n_members":     counts.shape[0],
         "n_events_total": counts.sum(axis=0),
         "mean_events_per_member": counts.mean(axis=0),
-        "f_mean": rates.mean(axis=0),
-        "sigma":  rates.std(axis=0, ddof=1),
-        "min":    rates.min(axis=0),
-        "max":    rates.max(axis=0),
-        # p025/p975 interpolate BETWEEN members, so unlike min/max they are not
-        # locked to the 1/roll_years granularity of an integer event count.
+        "f_mean":   rates.mean(axis=0),
+        "sigma":    rates.std(axis=0, ddof=1),
+        "min":      rates.min(axis=0),
+        "max":      rates.max(axis=0),
+        "rate_quantum": bin_width,
+        # Empirical (np.percentile) percentiles — kept for comparison.
+        "p25":    np.percentile(rates, 25.0, axis=0),
+        "p75":    np.percentile(rates, 75.0, axis=0),
         "p025":   np.percentile(rates,  2.5, axis=0),
         "p975":   np.percentile(rates, 97.5, axis=0)})
 
-    # Signal-to-noise ratio of Figure 2: ensemble mean over the across-member
-    # standard deviation, unitless. Windows where sigma == 0 (every member has
-    # the same count) give inf/NaN and are left as such rather than masked.
+    # Grouped percentiles, one pure call per window (W ≈ 10^2 — no need to vectorise).
+    q_grp = np.asarray(FREQ_PERCENTILES, dtype=float)
+    grouped = np.column_stack([grouped_percentile(rates[:, w], q_grp, bin_width)
+                               for w in range(rates.shape[1])])          # [4, W]
+    for name, row in zip(("p025_grouped", "p25_grouped",
+                          "p75_grouped", "p975_grouped"), grouped):
+        out[name] = row
+
+    # Signal-to-noise ratio of Figure 2: ensemble MEAN over the across-member
+    # standard deviation, unitless — the SAME central quantity Figure 1 draws.
+    # Windows where sigma == 0 (every member has the same count) give inf/NaN and
+    # are left as such rather than masked.
     with np.errstate(divide="ignore", invalid="ignore"):
         out["signal_to_noise"] = out["f_mean"] / out["sigma"]
     return out
@@ -1264,14 +1500,27 @@ def print_frequency_evolution_summary(result: dict) -> None:
     print(f"Windows: {len(e)} complete {c['roll_years']}-year windows, centres "
           f"{e['window_centre'].iloc[0]:g}–{e['window_centre'].iloc[-1]:g} "
           f"(step {c['roll_step']} yr)")
-    print(f"First window {e['window_centre'].iloc[0]:g}: {e['f_mean'].iloc[0]:.4g} events/year"
+    # ONE season-aware unit string for every number printed below.
+    unit = cfg.rate_unit_label(c["season_months"])
+    col  = frequency_spread_columns(c["spread_method"])
+    print(f"First window {e['window_centre'].iloc[0]:g}: {e['f_mean'].iloc[0]:.4g} {unit}"
           f"   |   last window {e['window_centre'].iloc[-1]:g}: "
-          f"{e['f_mean'].iloc[-1]:.4g} events/year")
-    print(f"Mean σ across members: {d['mean_sigma']:.4g} events/year")
+          f"{e['f_mean'].iloc[-1]:.4g} {unit}   (ensemble MEAN — the line of Figure 1)")
+    print(f"Mean σ across members: {d['mean_sigma']:.4g} {unit}")
+    print(f"IQR averaged over windows ({c['spread_method']}): "
+          f"p25 = {e[col['band_lo']].mean():.4g} … p75 = {e[col['band_hi']].mean():.4g} "
+          f"{unit}   (the blue band of Figure 1)")
+    # Granularity diagnostic: the empirical p25 can only land on multiples of the
+    # rate quantum 1/L, the grouped one interpolates through the tied blocks.
+    print(f"Rate quantum 1/L = {1.0 / c['roll_years']:.6g} {unit}  |  distinct p25 values "
+          f"over {len(e)} windows: empirical {e['p25'].nunique()}, "
+          f"grouped {e['p25_grouped'].nunique()}")
     print(f"S/N (ensemble mean / σ): range {e['signal_to_noise'].min():.2f} … "
           f"{e['signal_to_noise'].max():.2f}   |   first window "
           f"{e['signal_to_noise'].iloc[0]:.2f} → last window "
           f"{e['signal_to_noise'].iloc[-1]:.2f}")
+
+
     if d["mean_events_per_member_per_window"] < 5.0:
         print(f"[warning] only {d['mean_events_per_member_per_window']:.1f} events per member "
               f"per {c['roll_years']}-year window — σ across members is dominated by counting "
