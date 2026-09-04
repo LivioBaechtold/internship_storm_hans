@@ -53,8 +53,7 @@ The window operator depends on the variable:
 SWE (Snow-water Equivalent) decreases count and is stored as a positive melt magnitude, so accumulation
 maps to zero (no values below zero present) and high-melt days sit at the top of the distribution. 
 Rolling operators are always applied to the whole time-period before any season etc. is evaluated, so every window is
-complete. The window is in every filename as the name `1day`, `2day`, `3day`, … (`cfg.acc_tag`);
-the analysis in the report was run with `WINDOW_DAYS = 2`.
+complete. The window is in every filename as the name `1day`, `2day`, `3day` etc., here in this project 2day` was used.
 
 ### 1.3 Seasons
 
@@ -116,7 +115,7 @@ module is listed in `Code_Overview.md`, Sections 1–9.
 
 - **`config_paths.py`** — paths and constants only: raw-data and output directories, the
   catchment and ensemble registries, the season definitions, the model colours and labels, and
-  every path builder in the project.
+  every path builder in the project
 - **`data_era5.py`, `data_senorge.py`, `data_smile.py`** — one module per data source, all
   for file discovery, unit conversion, spatial-cache builders that write one NetCDF
   per dataset (or per ensemble member), and the gridded median / 90th-percentile computations.
