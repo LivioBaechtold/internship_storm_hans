@@ -157,34 +157,33 @@ Section 4 below.
   spatial distribution of precipitation in SMILE. Includes the Storm Hans event maps, the catchment
   weight maps, and the 1995–2024 climatology comparison against ERA5 regridded onto the CESM2-LE grid,
   including the significance-hatched annual, seasonal and single-season (`MAMJ`) versions.
-- **`compound_flood_risk_analysis.ipynb`** — the compound analysis part. The first half repeats the map
-  methodology for snowmelt and soil moisture instead of precipitation (units kg/m², one
-  `VARIABLES` dictionary configuring both). The second half is the compound analysis proper:
-  the joint distribution with the severity threshold line, the rolling-window evolution of the
-  exceedance frequency with its internal-variability band, and the signal-to-noise ratio.
+- **`compound_flood_risk_analysis.ipynb`** — the compound analysis part
+  Spatial Map Overview creation for snowmelt and soil moisture instead of precipitation (units kg/m², one
+  `VARIABLES` dictionary configuring both). The second half is the compound analysis with
+  joint distribution (threshold), the rolling-window definition of the exceedance frequency
+  with its internal-variability band, and the signal-to-noise ratio.
 
 ### 2.3 `figures/`
 
 Generated figures in separate folders (mostly separated by notebooks)
 
-- `timeseries_return_hans/` — return-period and time-series figures.
-- `climate_model_evaluation/` — distribution and Q-Q figures plus the CSV tables.
-- `precip_maps_hans/` — Storm Hans event maps, weight maps and precipitation climatology maps.
-- `compound_flood_risk_output/` — snowmelt and soil-moisture maps and the joint distributions.
-- `compound_flood_risk_output/frequency_evolution/` — the rolling-window frequency and
-  signal-to-noise figures together with their `{stem}_ensemble.csv` and `{stem}_metadata.json`.
+- `timeseries_return_hans/` — return-period and time-series figures
+- `climate_model_evaluation/` — distribution and Q-Q figures
+- `precip_maps_hans/` — Storm Hans maps, weight maps and precipitation climatology maps
+- `compound_flood_risk_output/` — snowmelt and soil-moisture maps and the joint distributions
+- `compound_flood_risk_output/frequency_evolution/` — rolling-window frequency and
+  signal-to-noise figures together with their `{stem}_ensemble.csv` and `{stem}_metadata.json`
 
 Every figure function writes to **two** roots: the repository folder above and a mirror under
 `FIGURES_DIR` on the data lake. A few of the largest seasonal PDFs are excluded from the
 repository in `.gitignore`.
 
-### 2.4 Large external data (not in this repo)
+### 2.4 Large external data used in project but not in repository
 
-The raw datasets and the postprocessed caches live outside the repository and are not tracked.
-The dataset keys in the first column are the ones used in the notebook parameter blocks
+The dataset names in the first column are the ones used in the notebook parameter blocks
 (`DATASET_KEY`, `SMILE_RUN_TABLE`) and in the cache filenames:
 
-| Key | Dataset | Grid | Variables | Members | Raw directory |
+| Name | Dataset | Grid | Variables | Members | Raw directory |
 |---|---|---|---|---|---|
 | `era5_0.5` | ERA5 | 0.5° | `tp24` (m) | — | `/nird/datapeak/NS9873K/etdu/raw/era5/…/tp24/` |
 | `era5_0.25` | ERA5 | 0.25° | `tp24` (m) | — | `/nird/datapeak/NS9873K/etdu/raw/era5/…/tp24/` |
@@ -197,11 +196,10 @@ Catchment GeoJSONs are in `/nird/datalake/NS9873K/etdu/raw/nve/`, the caches in
 `/nird/datalake/NS9873K/lbal/postprocessed/` and the figure mirror in
 `/nird/datalake/NS9873K/lbal/figures/`.
 
-ERA5 is converted from metres to mm on load; seNorge is already in mm and its fill value
-−999.99 is masked; the SMILE unit is auto-detected from the metadata. All spatial caches are
-cropped to `OVERALL_PRECIP_EXTENT = (3.0°E, 16.0°E, 56.5°N, 66.0°N)`, the domain of report
-Section 4.1. Only **90 of the 100** CESM2-LE members carry SWE and soil-moisture output — the
-odd members 001–019 are missing — so every compound quantity is computed on the intersection
+ERA5 is converted from metres to mm on load. seNorge is already in mm and its value
+−999.99 is masked. All spatial analysis are done on the grid `OVERALL_PRECIP_EXTENT = (3.0°E, 16.0°E, 56.5°N, 66.0°N)`, 
+the domain of report Section 4.1. Only **90 of the 100** CESM2-LE members contain SWE and soil-moisture data 
+(odd members 001–019 missing) so every compound quantity is computed on the intersection
 returned by `common_cesm2_le_members()` and the ensemble size is detected rather than assumed.
 
 The postprocessed tree is organised as:
@@ -218,69 +216,49 @@ postprocessed/
 └── old_gold/                archived earlier versions of the caches
 ```
 
-`overall_precipitation/` holds the cropped daily spatial caches (one file per dataset, or one
+`overall_precipitation/` contains the cropped daily spatial caches (one file per dataset, or one
 per ensemble member), `swe/` and `soil_moisture/` the daily state-variable caches and the
 derived N-day snowmelt caches, and `catchment_averaged/` the catchment time series, including
 the `[member, time]` CESM2-LE compound series.
 
-**Alternative: obtaining the data independently.** ERA5 can be downloaded from the Copernicus
-Climate Data Store, seNorge is distributed by MET Norway, and the two large ensembles are
-published by NCAR (CESM2-LE) and GFDL (SPEAR). Note that the files used here are not the raw
-archive versions: they are cropped to the Scandinavian domain, and ERA5 additionally exists in
-a version regridded onto the CESM2-LE grid. Reproducing them from the public sources therefore
-requires the cropping and regridding step before
-`code/load_data_store_postprocessed.ipynb` can be run.
+**Alternative ERA5 download** ERA5 can also be downloaded from the Copernicus Climate Data Store, 
+seNorge is distributed by MET Norway, and the two large ensembles are published by NCAR (CESM2-LE) 
+and GFDL (SPEAR). The respective files used here are pre-cropped to Scandinavia though.
 
 ---
 
 ## 3. Reproducing the analysis
 
-### 3.1 Order of execution
+### 3.1 Sequence of execution
 
-1. **`code/load_data_store_postprocessed.ipynb`** — build every cache. This is the only
-   notebook that touches the raw data; everything downstream reads the caches. It takes by far
-   the longest and only has to be run once. Every step skips what already exists unless the
-   corresponding `FORCE_*` flag is set.
+1. **`code/load_data_store_postprocessed.ipynb`** — first build all caches
 2. **`code/analysis_return_hans.ipynb`** — return periods, per reanalysis dataset and for the
-   two ensembles.
-3. **`code/climate_model_evaluation.ipynb`** — distribution, Q-Q and table comparison.
+   two ensembles
+3. **`code/climate_model_evaluation.ipynb`** — distribution, Q-Q and table comparison
 4. **`code/create_precip_maps_hans.ipynb`** — event maps, weight maps and the precipitation
-   climatology comparison.
+   climatology comparison
 5. **`code/compound_flood_risk_analysis.ipynb`** — snowmelt and soil-moisture maps, joint
-   distributions, frequency evolution and signal-to-noise.
+   distributions, frequency evolution and signal-to-noise
 
-Steps 2–5 are independent of each other and can be run in any order.
+Steps 2–5 are independent of each other and can be run in any order
 
-### 3.2 Where to change what
+### 3.2 Changes to apply
 
-Each notebook has one parameter block at the top; nothing below it needs editing.
+Each notebook has a parameter selection scheme at the beginning which can be adjusted the desired analysis.
 
 - **Window length** — `WINDOW_DAYS` in the map and compound notebooks, `WINDOW_DAYS_SWE` and
-  `WINDOW_DAYS_COMPOUND` in the preparation notebook. Only the 2-day compound series currently
-  exist on disk; selecting another window means re-running step 7 of the preparation notebook
-  first, which needs no raw reload because its inputs are complete.
+  `WINDOW_DAYS_COMPOUND` in the preparation notebook. Only the 2-day compound series was examined in this project.
+  Selecting another window means re-running step 7 of the preparation notebook first.
 - **Analysis period** — `MAP_START` / `MAP_END` for the maps, `EVAL_START_YEAR` /
-  `EVAL_END_YEAR` for the evaluation, `FE_START` / `FE_END` for the frequency evolution.
-- **Season** — `SPRING`, `JD_SEASON` and `FE_SEASON`, each taking a key of `cfg.SEASON_MONTHS`
-  or `"all"`.
+  `EVAL_END_YEAR` for the evaluation, `FE_START` / `FE_END` for the frequency evolution
+- **Season** — `SPRING`, `JD_SEASON` and `FE_SEASON`
 - **Compound selection** — the `JD_*` block for the joint distribution and the `FE_*` block for
-  the frequency evolution. The `FE_*` block is the code counterpart of Table 2 of the report:
-  catchment, variable pair, members, threshold, rolling-window length and step, season, and the
-  frozen reference window `FE_NORM_REF`.
+  the frequency evolution.
 - **Spread estimator** — `FE_SPREAD_METHOD`, `percentile_grouped` (default, report Eq. 8) or
-  `percentile_empirical`. `print_frequency_evolution_summary` reports the number of distinct
-  p25 values under both, which is the diagnostic for the staircase artefact.
-- **Rebuilding a cache** — the `FORCE_*` and `RECOMPUTE` flags, all `False` by default.
+  `percentile_empirical`
+- **Rebuilding a cache** — the `FORCE_*` and `RECOMPUTE` which are usually `False`
 
-If a required cache is missing, the helper functions raise an error that names the exact
-notebook cell and the exact setting that builds it, rather than failing somewhere deep inside
-the computation.
-
-### 3.3 Environment
-
-Python 3.11 with the standard geoscience stack: `numpy`, `pandas`, `xarray`, `dask`, `scipy`,
-`netCDF4`, `matplotlib`, `cartopy`, `geopandas`, `shapely` and `pyproj`. The notebooks set
-`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` to 1 and run Dask with the
-synchronous scheduler, which is what the shared login nodes expect.
+If sth is missing or was not pre-loaded yet, the helper functions give an error-message that names the exact
+notebook cell and the exact setting that builds it.
 
 ---
