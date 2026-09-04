@@ -1,36 +1,31 @@
 # Climate Change vs. Internal Variability of Compound Flood Drivers in Norway
 
-This repository contains the code and the small supporting files used for my Master internship
-project at NORCE (Norwegian Research Centre) / Bjerknes Centre for Climate Research in Bergen,
-supervised by Dr. Etienne Dunn-Sigouin and Dr. Sigrid Passano Hellan.
+This README gives an overview of the data and code structure from the analysis of this particular project.
 
-The goal of the project is twofold. First, to place the Storm Hans precipitation (7–9 August
-2023) in a statistical context by estimating its return period in reanalysis data and in two
-single-model initial-condition large ensembles (SMILEs). Second, to move from precipitation
-alone to the compound perspective — the joint occurrence of heavy precipitation with snowmelt
-or with wet soils — and to ask how the frequency of such compound situations evolves over
-1920–2034 in the CESM2 Large Ensemble, and how the forced signal compares with internal
+The goal of the project is to first of all evaluate the return period of Storm Hans and on the other hand analyze
+the compound precipitation + snowmelt compound flood driver and to ask how the frequency of such compound situations evolves over
+1920–2034 in the CESM2 Large Ensemble climate model, and how the forced signal compares with internal
 variability.
 
-The repository is organised so that it can be seen how the analysis was done and, given access
+The README is organised so that it can be seen how the analysis was done and given access
 to the ERA5 / seNorge / CESM2-LE / GFDL-SPEAR datasets, reproduce every figure of the report.
 
-**Where to look for what.** The project is documented in three places, and each answers a
-different question:
+Following documents give additional valuable insight into the methods and code structure, where
+especially **Code_Overview explains every function and variable defined**:
 
 | Document | Answers |
 |---|---|
-| **Internship report** (PDF) | *Why* — motivation, data, methods, results, discussion and limitations. All section, equation and figure numbers used below refer to it. |
-| **`Code_Overview.md`** | *Where* — the function-level reference: every constant and function of every module with its signature and a one-line description, plus a cell-by-cell listing of each notebook. |
-| **this README** | *What and in which order* — the conventions the code follows, the repository layout, and how to run and re-parametrise the analysis. |
+| **Internship report** (PDF) | Especially methods and results plus discussion sections |
+| **`Code_Overview.md`** | explains every constant and function of every module as a one-line description |
+| **this README** | the conventions the code follows as well as layout of code structure |
 
 ---
 
 ## 1. Analysis concept & naming conventions
 
-### 1.1 The two strands of the analysis
+### 1.1 The two parts of the analysis
 
-The project consists of two strands that share the same catchment-averaging machinery
+The project consists of two parts that have the same catchment-averaging machinery
 (report Section 4.2):
 
 - **Univariate precipitation extremes** — catchment-averaged precipitation series, annual
@@ -55,26 +50,23 @@ The window operator depends on the variable:
 | Snowmelt | SWE decrease, `max(0, −(SWE(t) − SWE(t−(N−1))))` | `rolling_melt` | Eq. 2 |
 | Soil moisture | rolling mean | `rolling_mean` | Eq. 3 |
 
-Only SWE decreases count and they are stored as a positive melt magnitude, so accumulation
-maps to zero and high-melt days sit at the top of the distribution. Rolling operators are
-always applied to the full record before any season or period is imposed, so every window is
-complete. The window appears in every filename as `1day`, `2day`, `3day`, … (`cfg.acc_tag`);
+SWE (Snow-water Equivalent) decreases count and is stored as a positive melt magnitude, so accumulation
+maps to zero (no values below zero present) and high-melt days sit at the top of the distribution. 
+Rolling operators are always applied to the whole time-period before any season etc. is evaluated, so every window is
+complete. The window is in every filename as the name `1day`, `2day`, `3day`, … (`cfg.acc_tag`);
 the analysis in the report was run with `WINDOW_DAYS = 2`.
 
 ### 1.3 Seasons
 
-A season is always a **named key** of `cfg.SEASON_MONTHS`, never an ad-hoc month range. Next
-to the four standard seasons `DJF`, `MAM`, `JJA`, `SON` there is the custom four-month spring
-window **`MAMJ`** (March–June), which is the season used throughout the compound analysis
-because the Norwegian melt season extends well into June. A window spanning a season boundary
+Next to the four standard seasons `DJF`, `MAM`, `JJA`, `SON` there is the extended spring season
+window **`MAMJ`** (March–June) for the analysis with the snowmelt compound driver. A window spanning a season boundary
 is assigned to the season of its closing day.
 
 ### 1.4 Catchments
 
-Five NVE catchments in southern Norway are used, referred to by their slug throughout the code
-and the filenames:
+Five NVE catchments in southern Norway are used, referred to in the code and the filenames:
 
-| Slug | Title | Source |
+| Name | Title | Source |
 |---|---|---|
 | `nevina_bergheim` | Nevina Bergheim | NVE NEVINA |
 | `nevina_honnefoss` | Nevina Hønnefoss | NVE NEVINA |
@@ -82,15 +74,14 @@ and the filenames:
 | `regine_drammen` | Regine Drammen | NVE REGINE |
 | `regine_glomma` | Regine Glomma | NVE REGINE |
 
-The compound analysis additionally uses the **dissolved union** `regine_drammen_glomma`
-(Drammen ∪ Glomma). Its two GeoJSONs are merged with `unary_union` into one polygon *before*
-the per-cell area fractions are computed, so the shared internal border is never double-counted
-and cells fully inside the union get weight 1.
+The compound analysis additionally uses the **combination** `regine_drammen_glomma`
+(Drammen + Glomma). Their two GeoJSONs are merged with `unary_union` into one polygon *before*
+the per-cell area fractions are computed -> the shared border is never double-counted
+
 
 ### 1.5 Filenames
 
-Figures and caches carry their full selection in the name, so two runs cannot overwrite each
-other. The general shape is
+Figures and caches have their full selection in the name, generally built up like this:
 
 ```
 {quantity}_{window}_{variables}_{catchment}_{start}-{end}[_{season}][_thr{value}][_ref{start}-{end}].pdf
@@ -102,79 +93,71 @@ For example:
 - `joint_distribution_2day_precipitation_snowmelt_regine_drammen_glomma_1995-2024_MAMJ_thr0.7.pdf`
 - `internal_variability_trend_2day_precipitation_snowmelt_regine_drammen_glomma_1920-2034_10year_thr0.9_ref1995-2024_MAMJ.pdf`
 
-`_ref1995-2024` is the **frozen reference window** that fixes the position of the compound
-threshold line, so two runs that differ only in the reference must not share a filename.
+`_ref1995-2024` is the **reference window** that fixes the position of the compound threshold line.
 
 ---
 
-## 2. Repository layout
+## 2. Repository structure/layout
 
-The repository holds two things: the importable Python modules in `helper/` and the
-orchestration notebooks in `code/`. All reusable logic lives in `helper/`; the notebooks only
-set parameters and call into it, and no reusable function is defined in a notebook.
+The repository is separated in two parts: **the Python module-imports in `helper/` and the
+code-execution notebooks in `code/`**. All reusable logic is in `helper/`, the notebooks only
+set parameters and call the functions inside `helper/`, no reusable function is defined in a notebook.
 
-**Important Note**: the raw data and all postprocessed caches live on the NIRD project area
+**Important**: the raw data and all postprocessed caches live on the NIRD project area
 `NS9873K` and are **not** part of this repository (see Section 2.4). Without access to that
-project the notebooks can be read but not executed. For access, please contact
-**Dr. Etienne Dunn-Sigouin (NORCE / Bjerknes Centre)**.
+project the notebooks can be read but not executed. 
 
 ### 2.1 `helper/`
 
-All importable Python modules. The separation of responsibilities is strict: paths live only
-in `config_paths.py`, figure code only in `plot_style.py`, and statistics only in
-`return_period.py` and `catchment_tools.py`. Every function of every module is listed in
-`Code_Overview.md`, Sections 1–9.
+All importable Python modules. They are strictly separated by theme and topic: paths are only
+in `config_paths.py`, figure code in `plot_style.py`, return-period build-ups in
+`return_period.py` and catchment-based calculations in `catchment_tools.py`. Every function of every 
+module is listed in `Code_Overview.md`, Sections 1–9.
 
 - **`config_paths.py`** — paths and constants only: raw-data and output directories, the
   catchment and ensemble registries, the season definitions, the model colours and labels, and
   every path builder in the project.
 - **`data_era5.py`, `data_senorge.py`, `data_smile.py`** — one module per data source, all
-  three with the same shape: file discovery, lazy loading with unit conversion, spatial-cache
-  builders that write one cropped daily NetCDF per dataset (or per ensemble member), and the
-  gridded median / 90th-percentile computations used by the map figures. `data_smile.py` also
-  holds the per-member statistics and the percentile-rank significance test.
-- **`catchment_tools.py`** — the core of the project: catchment averaging, cache I/O, the
-  window operators of Section 1.2, the CESM2-LE compound-series builder, the season handling,
-  the compound threshold statistics, the complete frequency-evolution pipeline including
-  `grouped_percentile`, and the two high-level return-period orchestrators `run_all`
-  (reanalyses) and `run_all_smile` (ensembles).
-- **`return_period.py`** — pure statistics, no I/O: annual maxima, Weibull plotting positions,
+  for file discovery, unit conversion, spatial-cache builders that write one NetCDF
+  per dataset (or per ensemble member), and the gridded median / 90th-percentile computations.
+  `data_smile.py` also holds the per-member statistics and the percentile-rank significance test.
+- **`catchment_tools.py`** — catchment averaging, the window operators of Section 1.2, the CESM2-LE
+  compound-series builder, the season handling, the compound threshold statistics, the complete
+  frequency-evolution, the two return-period commands `run_all`(reanalyses) and `run_all_smile` (ensembles).
+- **`return_period.py`** —  return period calculations: annual maxima, Weibull plotting positions,
   the GEV fit, return levels and the return-period estimate.
-- **`plot_style.py`** — every Matplotlib and Cartopy figure of the project, plus the projection
+- **`plot_style.py`** — Matplotlib and Cartopy figure of the project, plus the projection
   and colormap constants. No data loading and no statistics happen here.
-- **`generate_weights.py`** — run-once script that computes the per-cell area fraction of each
-  catchment on each model grid and writes one weight NetCDF per catchment × dataset. Runnable
-  from the command line via `--dataset`; existing weight files are skipped, so it is safe to
-  re-run.
-- **`test_grouped_percentile.py`** — reference unit test for `grouped_percentile`, locked
-  against a real 2002–2011 CESM2-LE window (90 members, L = 10). Run with
+- **`generate_weights.py`** — run-once .py-file that computes the per-cell area fraction of each
+  catchment on each model grid and writes one weight NetCDF per catchment × dataset.
+- **`test_grouped_percentile.py`** — reference unit test for `grouped_percentile`, tested
+  against 2002–2011 CESM2-LE window (90 members, L = 10). Run with
   `python helper/test_grouped_percentile.py` from the repository root.
 - **`prec_seq.txt`, `prec_div.txt`** — the IPCC sequential and diverging precipitation
-  colormaps as 256-row RGB tables, loaded at import time by `plot_style.py`.
+  colormaps as 256-row RGB tables which are used inside `plot_style.py`.
 
 ### 2.2 `code/`
 
-Five notebooks, listed here in execution order. Their cell-by-cell contents are in
-`Code_Overview.md`, Section 10; the figures they produce for the report are mapped in
+Five code-execution notebooks listed here. Their cell-by-cell contents are in
+`Code_Overview.md`, Section 10. The figures they produce for the report are mapped in
 Section 4 below.
 
-- **`load_data_store_postprocessed.ipynb`** — the single entry point that builds **all**
-  postprocessed caches consumed by the other notebooks: catchment weights, the daily
-  precipitation caches for ERA5, seNorge and both SMILEs, the ERA5-interpolated caches, the
-  daily SWE and soil-moisture caches, the N-day snowmelt caches and the CESM2-LE
-  catchment-averaged compound series. It is the only notebook that touches the raw data and it
-  produces no figures.
+- **`load_data_store_postprocessed.ipynb`** — builds **all** postprocessed caches
+  (catchment weights, daily precipitation caches for ERA5, seNorge and SMILEs,
+  the ERA5-interpolated caches, the daily SWE and soil-moisture caches, the N-day snowmelt
+  caches and the CESM2-LE catchment-averaged compound series. It is the only notebook that
+  takes the raw data and it produces no figures.
 - **`analysis_return_hans.ipynb`** — return-period analysis of Storm Hans, first for the
-  reanalyses (one dataset at a time via `DATASET_KEY`, looping the five catchments) and then
-  for the two SMILEs, whose members are pooled before the GEV fit.
+  reanalyses (one dataset at a time via `DATASET_KEY`) and then
+  for the two SMILEs  (members pooled before the GEV fit).
 - **`climate_model_evaluation.ipynb`** — evaluation of CESM2-LE and GFDL-SPEAR against ERA5
-  and seNorge over 1985–2024, per catchment and window: distribution figures, Q-Q plots and the
-  percentile-mapping and summary tables, the latter written as CSV next to the figures.
-- **`create_precip_maps_hans.ipynb`** — all spatial precipitation figures: the Storm Hans event
-  maps, the catchment weight maps, and the 1995–2024 climatology comparison against ERA5
-  regridded onto the CESM2-LE grid, including the significance-hatched annual, seasonal and
-  single-season (`MAMJ`) versions.
-- **`compound_flood_risk_analysis.ipynb`** — the compound part. The first half repeats the map
+  and seNorge over 1985–2024 per catchment and window. Analyzing distribution figures, Q-Q plots and the
+  percentile-mapping.
+- **`create_precip_maps_hans.ipynb`** — all spatial precipitation figures that give an overview of
+  spatial distribution of precipitation in SMILE. Includes the Storm Hans event maps, the catchment
+  weight maps, and the 1995–2024 climatology comparison against ERA5 regridded onto the CESM2-LE grid,
+  including the significance-hatched annual, seasonal and single-season (`MAMJ`) versions.
+- **`compound_flood_risk_analysis.ipynb`** — the compound analysis part. The first half repeats the map
   methodology for snowmelt and soil moisture instead of precipitation (units kg/m², one
   `VARIABLES` dictionary configuring both). The second half is the compound analysis proper:
   the joint distribution with the severity threshold line, the rolling-window evolution of the
@@ -182,7 +165,7 @@ Section 4 below.
 
 ### 2.3 `figures/`
 
-Generated figures, one sub-folder per notebook:
+Generated figures in separate folders (mostly separated by notebooks)
 
 - `timeseries_return_hans/` — return-period and time-series figures.
 - `climate_model_evaluation/` — distribution and Q-Q figures plus the CSV tables.
@@ -301,27 +284,3 @@ Python 3.11 with the standard geoscience stack: `numpy`, `pandas`, `xarray`, `da
 synchronous scheduler, which is what the shared login nodes expect.
 
 ---
-
-## 4. Report ↔ code map
-
-Which part of the code produces which result of the report:
-
-| Report | Produced by | Key functions |
-|---|---|---|
-| Eq. 1–3 (window operators) | `helper/catchment_tools.py` | `rolling_accumulation`, `rolling_melt`, `rolling_mean` |
-| Sec. 4.2 (catchment aggregation) | `helper/generate_weights.py`, `catchment_tools.py` | `build_weights`, `align_weights_to_precip`, `compute_catchment_mean` |
-| Fig. 1 (return periods) | `analysis_return_hans.ipynb` | `run_all`, `run_all_smile`, `fit_gev`, `estimate_return_period` |
-| Fig. 2 (model bias evaluation) | `climate_model_evaluation.ipynb` | `make_distribution_figure`, `build_percentile_mapping_table` |
-| Fig. 3 (precipitation p90 maps) | `create_precip_maps_hans.ipynb` | `compute_cesm2_le_window_per_member_p90_2d`, `compute_significance_masks` |
-| Fig. 4 (snowmelt p90 maps) | `compound_flood_risk_analysis.ipynb`, first half | the same functions, driven by the `VARIABLES` dictionary |
-| Fig. 5, Eq. 6 (joint distribution, severity) | `compound_flood_risk_analysis.ipynb`, cells 11–12 | `compound_threshold_stats`, `make_joint_distribution_figure` |
-| Fig. 6–7, Table 2 (frequency evolution) | `compound_flood_risk_analysis.ipynb`, cells 13–14 | `run_compound_frequency_evolution`, `plot_internal_variability_trend` |
-| Fig. 8–9, Eq. 7 (signal-to-noise) | `compound_flood_risk_analysis.ipynb`, cell 15 | `ensemble_frequency_statistics`, `plot_signal_to_noise_ratio` |
-| Eq. 8 (grouped percentiles) | `helper/catchment_tools.py` | `grouped_percentile`, pinned by `test_grouped_percentile.py` |
-
-Two methodological points are worth keeping in mind when reading the frequency-evolution code,
-and both are stated in the report (Sections 4.8 and 6.3) as well as in the notebook cell that
-runs them: the normalisation maxima are **frozen** on `FE_NORM_REF`, so the criterion is one
-fixed line in the (x, y) plane and a drifting denominator cannot masquerade as a trend; and
-there is **no declustering** and the rolling windows **overlap**, so one storm can count on
-several consecutive days and consecutive points of the curve are not independent.
